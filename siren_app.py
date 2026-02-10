@@ -474,13 +474,17 @@ class ControllerHandler(BaseHandler):
     receiver_url: str
     token: Optional[str]
 
-    def _send_action(self, path: str) -> tuple[bool, str]:
-        req = urllib.request.Request(urllib.parse.urljoin(self.receiver_url, path), method="POST", data=b"ts=1")
+    def _build_receiver_request(self, path: str, *, method: str, data: Optional[bytes] = None) -> urllib.request.Request:
+        req = urllib.request.Request(urllib.parse.urljoin(self.receiver_url, path), method=method, data=data)
         req.add_header("Accept", "application/json")
         req.add_header("X-Requested-With", "fetch")
+        req.add_header("ngrok-skip-browser-warning", "true")
         if self.token:
             req.add_header("X-Token", self.token)
-        req.add_header("ngrok-skip-browser-warning", "true")
+        return req
+
+    def _send_action(self, path: str) -> tuple[bool, str]:
+        req = self._build_receiver_request(path, method="POST", data=b"ts=1")
         try:
             with urllib.request.urlopen(req, timeout=4) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
@@ -488,13 +492,27 @@ class ControllerHandler(BaseHandler):
         except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
             return False, f"Erro ao contactar receptor: {exc}"
 
+    def _fetch_status(self) -> tuple[bool, dict[str, object]]:
+        req = self._build_receiver_request("/status", method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return True, payload
+        except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
+            return False, {"running": False, "last_emit_at": None, "error": f"Erro ao consultar receptor: {exc}"}
+
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/status":
+            ok, payload = self._fetch_status()
+            self._write(HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY, json.dumps(payload, ensure_ascii=False), "application/json")
+            return
+
         if self.path != "/":
             self._write(HTTPStatus.NOT_FOUND, "Not found")
             return
         body = f"""
         <html><head><meta charset='utf-8'><title>Controlador</title><style>{_neon_styles()}</style></head>
-        <body data-status-endpoint='{html.escape(urllib.parse.urljoin(self.receiver_url, '/status'))}'>
+        <body data-status-endpoint='/status'>
           <div class='wrap'><div class='card'>
             <h1 class='title'>🚨 Controlador Central</h1>
             <p class='subtitle'>Controle remoto robusto do receptor.</p>
