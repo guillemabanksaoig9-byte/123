@@ -551,16 +551,41 @@ class ServerRuntime:
 
 
 class ControllerServer:
-    def __init__(self, bind: str, port: int, receiver_url: str, token: Optional[str]) -> None:
+    def __init__(self, bind: str, port: int, receiver_url: str, token: Optional[str], ngrok: bool) -> None:
         self.bind = bind
         self.port = port
         self.receiver_url = receiver_url.rstrip("/")
         self.token = token
+        self.ngrok = ngrok
+
+    def _start_ngrok(self) -> Optional[str]:
+        try:
+            subprocess.Popen(["ngrok", "http", str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            LOG.warning("Ngrok não encontrado. Use --no-ngrok ou instale o binário.")
+            return None
+
+        url = "http://127.0.0.1:4040/api/tunnels"
+        for _ in range(16):
+            try:
+                with urllib.request.urlopen(url, timeout=1) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                tunnels = data.get("tunnels", [])
+                if tunnels:
+                    return tunnels[0].get("public_url")
+            except (urllib.error.URLError, socket.timeout, json.JSONDecodeError):
+                time.sleep(0.4)
+        LOG.warning("Ngrok iniciou, mas o link público do controlador não foi obtido automaticamente.")
+        return None
 
     def serve(self) -> None:
         handler = type("ConfiguredControllerHandler", (ControllerHandler,), {"receiver_url": self.receiver_url, "token": self.token})
         server = ThreadingHTTPServer((self.bind, self.port), handler)
         LOG.info("Controlador ativo em http://%s:%d", self.bind, self.port)
+        if self.ngrok:
+            public_url = self._start_ngrok()
+            if public_url:
+                LOG.info("Ngrok do controlador: %s", public_url)
         ServerRuntime(server).serve_forever()
 
 
@@ -615,6 +640,7 @@ def parse_args() -> argparse.Namespace:
     controller.add_argument("--port", type=int, default=5000)
     controller.add_argument("--receiver-url", required=True, help="URL base do receptor (ex: http://IP:5001)")
     controller.add_argument("--token", help="Token compartilhado com o receptor")
+    controller.add_argument("--no-ngrok", dest="ngrok", action="store_false", default=True)
 
     receiver = sub.add_parser("receiver", help="Inicia o Receptor")
     receiver.add_argument("--bind", default="0.0.0.0")
@@ -630,7 +656,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.mode == "controller":
-        ControllerServer(args.bind, args.port, args.receiver_url, args.token).serve()
+        ControllerServer(args.bind, args.port, args.receiver_url, args.token, args.ngrok).serve()
     elif args.mode == "receiver":
         ReceiverServer(args.bind, args.port, args.token, args.ngrok).serve()
 
