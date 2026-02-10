@@ -410,6 +410,9 @@ class ReceiverState:
         with self.lock:
             return {"running": self.player.is_running(), "last_emit_at": self.last_emit_at}
 
+# =========================
+# HTTP shared
+# =========================
 
 # =========================
 # HTTP shared
