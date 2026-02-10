@@ -16,17 +16,21 @@ import hmac
 import html
 import json
 import logging
+import math
 import os
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -220,12 +224,16 @@ def _neon_script() -> str:
 
 
 class SirenPlayer:
-    """Player de sirene com loop rápido estilo policial."""
+    """Player de sirene policial (wail + yelp), inspirado no app de referência."""
+
+    SAMPLE_RATE = 44100
+    AMPLITUDE = 30000
 
     def __init__(self) -> None:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._wail_path, self._yelp_path = self._ensure_wav_files()
 
     def start(self) -> None:
         with self._lock:
@@ -245,44 +253,95 @@ class SirenPlayer:
 
     def _play_loop(self) -> None:
         while not self._stop_event.is_set():
-            self._beep_cycle()
+            self._play(self._wail_path)
+            if not self._stop_event.is_set():
+                self._play(self._yelp_path)
 
-    def _beep_cycle(self) -> None:
+    def _generate_sweep(self, duration: float, freq_lo: float, freq_hi: float, cycle: float) -> bytes:
+        n = int(self.SAMPLE_RATE * duration)
+        phase = 0.0
+        samples: list[int] = []
+        for i in range(n):
+            t = i / self.SAMPLE_RATE
+            sweep = (math.sin(2 * math.pi * t / cycle - math.pi / 2) + 1) / 2
+            freq = freq_lo + (freq_hi - freq_lo) * sweep
+            phase += 2 * math.pi * freq / self.SAMPLE_RATE
+            sample = int(self.AMPLITUDE * math.sin(phase))
+            samples.append(max(-32767, min(32767, sample)))
+        return struct.pack(f"<{len(samples)}h", *samples)
+
+    def _write_wav(self, pcm: bytes, path: str) -> None:
+        with wave.open(path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.SAMPLE_RATE)
+            wf.writeframes(pcm)
+
+    def _ensure_wav_files(self) -> tuple[str, str]:
+        tmp = tempfile.gettempdir()
+        wail = os.path.join(tmp, "police_wail.wav")
+        yelp = os.path.join(tmp, "police_yelp.wav")
+        if not os.path.exists(wail):
+            self._write_wav(self._generate_sweep(4.0, 600, 1600, 4.0), wail)
+        if not os.path.exists(yelp):
+            self._write_wav(self._generate_sweep(2.0, 800, 1600, 0.3), yelp)
+        return wail, yelp
+
+    def _play(self, path: str) -> None:
+        if self._stop_event.is_set():
+            return
         if os.name == "nt":
-            import winsound
-
-            for freq in (760, 1650) * 6:
-                if self._stop_event.is_set():
-                    return
-                winsound.Beep(freq, 90)
+            self._play_windows(path)
             return
 
-        if shutil.which("play"):
-            cmd = [
-                "play",
-                "-q",
-                "-n",
-                "synth",
-                "0.09",
-                "sawtooth",
-                "760",
-                "synth",
-                "0.09",
-                "sawtooth",
-                "1650",
-            ]
+        self._play_unix(path)
+
+    def _play_windows(self, path: str) -> None:
+        try:
+            import winsound
+
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            return
+        except Exception:
+            pass
+
+        try:
+            import winsound
+
+            for freq in range(600, 1600, 50):
+                if self._stop_event.is_set():
+                    return
+                winsound.Beep(freq, 30)
+            for freq in range(1600, 600, -50):
+                if self._stop_event.is_set():
+                    return
+                winsound.Beep(freq, 30)
+        except Exception:
+            return
+
+    def _play_unix(self, path: str) -> None:
+        for cmd in ("paplay", "aplay", "play"):
+            if not shutil.which(cmd):
+                continue
+            player_cmd = [cmd, path] if cmd in {"paplay", "aplay"} else [cmd, path]
             try:
-                subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(player_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                while proc.poll() is None:
+                    if self._stop_event.is_set():
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                        return
+                    time.sleep(0.1)
                 return
             except OSError:
-                pass
+                continue
 
-        # fallback universal
+        # fallback universal (som do terminal)
         for _ in range(8):
             if self._stop_event.is_set():
                 return
             print("\a", end="", flush=True)
-            time.sleep(0.09)
+            time.sleep(0.25)
 
 
 @dataclass
@@ -361,9 +420,8 @@ class ReceiverHandler(BaseHandler):
               <p class='subtitle'>Console local do receptor.</p>
               <div class='info-row'><span>Status: <span class='status-pill {'' if status == 'Tocando' else 'off'}' data-status>{status}</span></span>
               <span>Último acionamento: <strong data-last>{html.escape(last)}</strong></span></div>
-              <div class='grid'><button class='btn primary' data-action='/emit'>Ligar Sirene</button>
-              <button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
-              <div class='response' data-message>Pronto para ações locais no receptor.</div>
+              <div class='grid'><button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
+              <div class='response' data-message>No receptor, apenas a ação de parada fica disponível.</div>
             </div></div><script>{_neon_script()}</script></body></html>
             """
             self._write(HTTPStatus.OK, body)
@@ -375,12 +433,11 @@ class ReceiverHandler(BaseHandler):
             <html><head><meta charset='utf-8'><title>Controle</title><style>{_neon_styles()}</style></head>
             <body data-status-endpoint='/status'><div class='wrap'><div class='card'>
               <h1 class='title'>🚨 Emitir Sirene</h1>
-              <p class='subtitle'>Controle remoto simplificado.</p>
+              <p class='subtitle'>A página do receptor permite somente parar.</p>
               <div class='info-row'><span class='status-pill off' data-status>Parada</span></div>
               <input type='hidden' data-token value='{token_hint}' />
-              <div class='grid'><button class='btn primary' data-action='/emit'>Ligar Sirene</button>
-              <button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
-              <div class='response' data-message>Use os botões para ligar/parar.</div>
+              <div class='grid'><button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
+              <div class='response' data-message>Para ligar a sirene, use o painel do controlador.</div>
             </div></div><script>{_neon_script()}</script></body></html>
             """
             self._write(HTTPStatus.OK, body)
@@ -417,12 +474,17 @@ class ControllerHandler(BaseHandler):
     receiver_url: str
     token: Optional[str]
 
-    def _send_action(self, path: str) -> tuple[bool, str]:
-        req = urllib.request.Request(urllib.parse.urljoin(self.receiver_url, path), method="POST", data=b"ts=1")
+    def _build_receiver_request(self, path: str, *, method: str, data: Optional[bytes] = None) -> urllib.request.Request:
+        req = urllib.request.Request(urllib.parse.urljoin(self.receiver_url, path), method=method, data=data)
         req.add_header("Accept", "application/json")
         req.add_header("X-Requested-With", "fetch")
+        req.add_header("ngrok-skip-browser-warning", "true")
         if self.token:
             req.add_header("X-Token", self.token)
+        return req
+
+    def _send_action(self, path: str) -> tuple[bool, str]:
+        req = self._build_receiver_request(path, method="POST", data=b"ts=1")
         try:
             with urllib.request.urlopen(req, timeout=4) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
@@ -430,13 +492,27 @@ class ControllerHandler(BaseHandler):
         except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
             return False, f"Erro ao contactar receptor: {exc}"
 
+    def _fetch_status(self) -> tuple[bool, dict[str, object]]:
+        req = self._build_receiver_request("/status", method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return True, payload
+        except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
+            return False, {"running": False, "last_emit_at": None, "error": f"Erro ao consultar receptor: {exc}"}
+
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/status":
+            ok, payload = self._fetch_status()
+            self._write(HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY, json.dumps(payload, ensure_ascii=False), "application/json")
+            return
+
         if self.path != "/":
             self._write(HTTPStatus.NOT_FOUND, "Not found")
             return
         body = f"""
         <html><head><meta charset='utf-8'><title>Controlador</title><style>{_neon_styles()}</style></head>
-        <body data-status-endpoint='{html.escape(urllib.parse.urljoin(self.receiver_url, '/status'))}'>
+        <body data-status-endpoint='/status'>
           <div class='wrap'><div class='card'>
             <h1 class='title'>🚨 Controlador Central</h1>
             <p class='subtitle'>Controle remoto robusto do receptor.</p>
@@ -475,16 +551,41 @@ class ServerRuntime:
 
 
 class ControllerServer:
-    def __init__(self, bind: str, port: int, receiver_url: str, token: Optional[str]) -> None:
+    def __init__(self, bind: str, port: int, receiver_url: str, token: Optional[str], ngrok: bool) -> None:
         self.bind = bind
         self.port = port
         self.receiver_url = receiver_url.rstrip("/")
         self.token = token
+        self.ngrok = ngrok
+
+    def _start_ngrok(self) -> Optional[str]:
+        try:
+            subprocess.Popen(["ngrok", "http", str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            LOG.warning("Ngrok não encontrado. Use --no-ngrok ou instale o binário.")
+            return None
+
+        url = "http://127.0.0.1:4040/api/tunnels"
+        for _ in range(16):
+            try:
+                with urllib.request.urlopen(url, timeout=1) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                tunnels = data.get("tunnels", [])
+                if tunnels:
+                    return tunnels[0].get("public_url")
+            except (urllib.error.URLError, socket.timeout, json.JSONDecodeError):
+                time.sleep(0.4)
+        LOG.warning("Ngrok iniciou, mas o link público do controlador não foi obtido automaticamente.")
+        return None
 
     def serve(self) -> None:
         handler = type("ConfiguredControllerHandler", (ControllerHandler,), {"receiver_url": self.receiver_url, "token": self.token})
         server = ThreadingHTTPServer((self.bind, self.port), handler)
         LOG.info("Controlador ativo em http://%s:%d", self.bind, self.port)
+        if self.ngrok:
+            public_url = self._start_ngrok()
+            if public_url:
+                LOG.info("Ngrok do controlador: %s", public_url)
         ServerRuntime(server).serve_forever()
 
 
@@ -538,6 +639,7 @@ def parse_args() -> argparse.Namespace:
     controller.add_argument("--port", type=int, default=5000)
     controller.add_argument("--receiver-url", required=True, help="URL base do receptor (ex: http://IP:5001)")
     controller.add_argument("--token", help="Token compartilhado com o receptor")
+    controller.add_argument("--no-ngrok", dest="ngrok", action="store_false", default=True)
 
     receiver = sub.add_parser("receiver", help="Inicia o Receptor")
     receiver.add_argument("--bind", default="0.0.0.0")
@@ -553,7 +655,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     if args.mode == "controller":
-        ControllerServer(args.bind, args.port, args.receiver_url, args.token).serve()
+        ControllerServer(args.bind, args.port, args.receiver_url, args.token, args.ngrok).serve()
     elif args.mode == "receiver":
         ReceiverServer(args.bind, args.port, args.token, args.ngrok).serve()
 
