@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Aplicativo de sirene remota (Controlador + Receptor).
+"""Aplicativo de sirene remota (arquivo único, sem dependências externas).
 
-Melhorias implementadas:
-- Arquitetura mais robusta com estado thread-safe e logs estruturados.
-- Segurança com validação de token em comparação de tempo constante.
-- Endpoints JSON consistentes e tratamento de erros HTTP.
-- Interface web com atualização periódica de status.
-- Sirene policial mais rápida (cliente e receptor).
+Melhorias principais:
+- Estrutura reescrita e modular dentro de um único arquivo.
+- Modo explícito: receiver | controller | both.
+- UI separada e inequívoca para receptor e controlador.
+- Cliente HTTP robusto com diagnóstico detalhado.
+- Token opcional com comparação em tempo constante.
+- Estado do receptor thread-safe.
 """
 
 from __future__ import annotations
 
+import argparse
 import hmac
 import html
+import itertools
 import json
 import logging
 import math
@@ -29,138 +32,150 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import Any, Optional
 
-LOCALHOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+LOCALHOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
 LOG = logging.getLogger("siren-app")
+RID_COUNTER = itertools.count(1)
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+# =========================
+# Utilitários
+# =========================
 
 
-def _json_response(ok: bool, status: str, message: str, **extra: object) -> str:
-    payload = {"ok": ok, "status": status, "message": message, **extra}
-    return json.dumps(payload, ensure_ascii=False)
+def configure_logging(level: str = "INFO") -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
-def _safe_eq(left: Optional[str], right: Optional[str]) -> bool:
+def now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def safe_eq(left: Optional[str], right: Optional[str]) -> bool:
     if left is None or right is None:
         return False
     return hmac.compare_digest(left, right)
 
 
-def _neon_styles() -> str:
+def mask_secret(secret: Optional[str]) -> str:
+    if not secret:
+        return "(none)"
+    if len(secret) <= 4:
+        return "*" * len(secret)
+    return f"{secret[:2]}{'*' * (len(secret) - 4)}{secret[-2:]}"
+
+
+def detect_local_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def find_available_port(preferred: int) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", preferred))
+            return preferred
+        except OSError:
+            sock.bind(("", 0))
+            return int(sock.getsockname()[1])
+
+
+def request_id() -> str:
+    return f"r{int(time.time() * 1000)}-{next(RID_COUNTER)}"
+
+
+def json_text(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False)
+
+
+# =========================
+# Interface
+# =========================
+
+
+def neon_styles() -> str:
     return """
     :root {
       color-scheme: dark;
-      --bg: #06060a;
       --card: rgba(13, 18, 32, 0.72);
       --card-border: rgba(255, 255, 255, 0.08);
       --accent: #ff2d55;
-      --accent-2: #ff5c5c;
-      --accent-3: #ff9f0a;
       --text: #f8fafc;
       --muted: #8b98a7;
-      --glow: 0 0 24px rgba(255, 45, 85, 0.45);
+      --receiver: #0ea5e9;
+      --controller: #a855f7;
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0;
-      font-family: "Segoe UI", system-ui, sans-serif;
+      margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
       background: radial-gradient(circle at top, #10162c 0%, #06060a 60%, #050508 100%);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-      overflow-x: hidden;
+      color: var(--text); min-height: 100vh; display: flex;
+      align-items: center; justify-content: center;
     }
-    body::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        radial-gradient(circle at 15% 20%, rgba(255, 45, 85, 0.22), transparent 40%),
-        radial-gradient(circle at 85% 30%, rgba(255, 159, 10, 0.18), transparent 45%),
-        radial-gradient(circle at 50% 80%, rgba(93, 86, 255, 0.16), transparent 50%);
-      animation: pulse 10s ease-in-out infinite;
-      z-index: 0;
-    }
-    @keyframes pulse { 0%, 100% { opacity: 0.8; } 50% { opacity: 1; } }
-    .wrap { width: min(760px, 92vw); position: relative; z-index: 1; }
+    .wrap { width: min(920px, 94vw); }
     .card {
-      backdrop-filter: blur(18px);
-      background: var(--card);
-      border: 1px solid var(--card-border);
-      border-radius: 22px;
-      padding: 32px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), inset 0 0 40px rgba(255, 45, 85, 0.08);
+      backdrop-filter: blur(18px); background: var(--card);
+      border: 1px solid var(--card-border); border-radius: 20px;
+      padding: 28px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
     }
-    .title { display: flex; align-items: center; gap: 12px; margin: 0 0 8px; font-size: 30px; }
+    .title { margin: 0 0 8px; font-size: 30px; }
     .subtitle { color: var(--muted); margin-top: 0; }
+    .banner { border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; font-weight: 700; }
+    .banner.receiver { background: rgba(14,165,233,0.2); border: 1px solid rgba(14,165,233,0.45); }
+    .banner.controller { background: rgba(168,85,247,0.2); border: 1px solid rgba(168,85,247,0.45); }
     .status-pill {
-      display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
-      border-radius: 999px; background: rgba(255, 45, 85, 0.15); color: var(--accent-2);
-      font-weight: 600; box-shadow: var(--glow);
+      display: inline-flex; padding: 6px 12px; border-radius: 999px;
+      background: rgba(255,45,85,0.2); color: #fecdd3; font-weight: 700;
     }
-    .status-pill.off { background: rgba(148, 163, 184, 0.18); color: #cbd5f5; box-shadow: none; }
-    .grid { display: grid; gap: 14px; margin-top: 24px; }
+    .status-pill.off { background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }
+    .grid { display: grid; gap: 12px; margin-top: 14px; }
     .btn {
-      width: 100%; border: none; border-radius: 14px; padding: 16px; font-size: 18px;
-      font-weight: 700; cursor: pointer; transition: transform 0.15s ease, filter 0.2s;
+      width: 100%; border: none; border-radius: 12px; padding: 14px;
+      font-size: 18px; font-weight: 700; cursor: pointer;
     }
-    .btn:active { transform: translateY(2px); }
-    .btn.primary { background: linear-gradient(135deg, var(--accent), #ff7a85); color: #fff; }
-    .btn.secondary { background: rgba(15, 23, 42, 0.9); color: #fff; border: 1px solid rgba(255, 255, 255, 0.12); }
-    .btn.ghost { background: transparent; color: var(--accent-2); border: 1px solid rgba(255, 92, 92, 0.4); }
-    .btn:hover { filter: brightness(1.08); }
-    .response { margin-top: 18px; padding: 12px 16px; border-radius: 12px; background: rgba(6, 10, 24, 0.75); }
-    .info-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; color: var(--muted); }
+    .btn.primary { background: linear-gradient(135deg, #ff2d55, #ff7a85); color: #fff; }
+    .btn.secondary { background: rgba(15,23,42,0.95); color: #fff; border: 1px solid rgba(255,255,255,0.12); }
+    .btn.warning { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #111827; }
+    .response { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: rgba(6,10,24,0.8); }
+    .info-row { display: flex; flex-wrap: wrap; gap: 10px 14px; color: var(--muted); }
+    .links a { color: #fda4af; text-decoration: none; }
+    code { background: rgba(30,41,59,0.75); border-radius: 7px; padding: 1px 6px; }
     """
 
 
-def _neon_script() -> str:
+def neon_script() -> str:
     return """
     const statusEl = document.querySelector('[data-status]');
     const messageEl = document.querySelector('[data-message]');
     const lastEl = document.querySelector('[data-last]');
-    const tokenEl = document.querySelector('[data-token]');
-    const statusEndpoint = document.body.dataset.statusEndpoint;
+    const endpointStatus = document.body.dataset.statusEndpoint || '';
 
     function setStatus(state, message, last) {
-      if (!statusEl) return;
-      statusEl.textContent = state;
-      statusEl.classList.toggle('off', state.toLowerCase().includes('parad'));
-      if (messageEl) messageEl.innerHTML = message || '';
-      if (lastEl && typeof last !== 'undefined' && last !== null) lastEl.textContent = last;
+      if (statusEl && state) {
+        statusEl.textContent = state;
+        statusEl.classList.toggle('off', state.toLowerCase().includes('parad') || state.toLowerCase().includes('off'));
+      }
+      if (messageEl && typeof message === 'string') messageEl.innerHTML = message;
+      if (lastEl && (last || last === '')) lastEl.textContent = last || '—';
     }
 
-    async function postAction(path) {
-      const token = tokenEl ? tokenEl.value : '';
-      const body = token ? new URLSearchParams({ token }).toString() : '';
-      const response = await fetch(path, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json', 'X-Requested-With': 'fetch' },
-        body
-      });
-      const payload = await response.json();
-      setStatus(payload.status || 'Falha', payload.message ? `<strong>${payload.message}</strong>` : '', payload.last_emit_at);
-      return payload;
-    }
-
-    function playFastPoliceSiren(durationMs = 3000) {
+    function playFastPoliceSiren(durationMs = 2800) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) return;
       const ctx = window._audioCtx || (window._audioCtx = new Ctx());
@@ -169,12 +184,11 @@ def _neon_script() -> str:
       const gain = ctx.createGain();
       oscA.type = 'sawtooth';
       oscB.type = 'square';
-      gain.gain.value = 0.12;
+      gain.gain.value = 0.11;
       oscA.connect(gain).connect(ctx.destination);
       oscB.connect(gain);
       oscA.start();
       oscB.start();
-
       let high = false;
       const interval = setInterval(() => {
         high = !high;
@@ -182,7 +196,6 @@ def _neon_script() -> str:
         oscA.frequency.setValueAtTime(f, ctx.currentTime);
         oscB.frequency.setValueAtTime(f * 1.015, ctx.currentTime);
       }, 90);
-
       setTimeout(() => {
         clearInterval(interval);
         oscA.stop();
@@ -190,26 +203,38 @@ def _neon_script() -> str:
       }, durationMs);
     }
 
+    async function postAction(path) {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'X-Requested-With': 'fetch' }
+      });
+      const payload = await response.json();
+      const statusText = payload.status || (payload.ok ? 'OK' : 'Falha');
+      const extra = payload.receiver_status ? `<br><small>receiver_status=${payload.receiver_status}</small>` : '';
+      setStatus(statusText, `<strong>${payload.message || ''}</strong>${extra}`, payload.last_emit_at || '—');
+      return payload;
+    }
+
     async function refreshStatus() {
-      if (!statusEndpoint) return;
+      if (!endpointStatus) return;
       try {
-        const r = await fetch(statusEndpoint, { headers: { Accept: 'application/json' } });
-        if (!r.ok) return;
+        const r = await fetch(endpointStatus, { headers: { Accept: 'application/json' } });
         const p = await r.json();
-        setStatus(p.running ? 'Tocando' : 'Parada', '', p.last_emit_at || '—');
+        if (p.running === true) setStatus('Tocando', messageEl ? messageEl.innerHTML : '', p.last_emit_at || '—');
+        if (p.running === false) setStatus('Parada', messageEl ? messageEl.innerHTML : '', p.last_emit_at || '—');
       } catch (_) {}
     }
 
     document.querySelectorAll('[data-action]').forEach(btn => {
       btn.addEventListener('click', async () => {
         btn.disabled = true;
+        const action = btn.dataset.action;
         try {
-          const action = btn.dataset.action;
           const payload = await postAction(action);
-          if (payload.ok && action === '/emit') playFastPoliceSiren();
-          refreshStatus();
+          if (payload.ok && action.includes('/emit')) playFastPoliceSiren();
+          await refreshStatus();
         } catch (_) {
-          setStatus('Falha', 'Não foi possível comunicar com o receptor.', null);
+          setStatus('Falha', '<strong>Erro de rede ao executar ação.</strong>', null);
         } finally {
           btn.disabled = false;
         }
@@ -221,9 +246,35 @@ def _neon_script() -> str:
     """
 
 
-class SirenPlayer:
-    """Player de sirene policial (wail + yelp), inspirado no app de referência."""
+def layout_page(*, title: str, subtitle: str, banner_class: str, banner_text: str, body_html: str, status_endpoint: str) -> str:
+    return f"""
+    <html>
+      <head>
+        <meta charset='utf-8'>
+        <meta name='viewport' content='width=device-width, initial-scale=1'>
+        <title>{html.escape(title)}</title>
+        <style>{neon_styles()}</style>
+      </head>
+      <body data-status-endpoint='{html.escape(status_endpoint)}'>
+        <div class='wrap'>
+          <div class='card'>
+            <div class='banner {html.escape(banner_class)}'>{html.escape(banner_text)}</div>
+            <h1 class='title'>🚨 {html.escape(title)}</h1>
+            <p class='subtitle'>{html.escape(subtitle)}</p>
+            {body_html}
+          </div>
+        </div>
+        <script>{neon_script()}</script>
+      </body>
+    </html>
+    """
 
+
+# =========================
+# Sirene
+# =========================
+
+class SirenPlayer:
     SAMPLE_RATE = 44100
     AMPLITUDE = 30000
 
@@ -290,40 +341,29 @@ class SirenPlayer:
             return
         if os.name == "nt":
             self._play_windows(path)
-            return
-
-        self._play_unix(path)
+        else:
+            self._play_unix(path)
 
     def _play_windows(self, path: str) -> None:
-        try:
-            import winsound
+        import winsound
 
+        try:
             winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
             return
-        except Exception:
+        except RuntimeError:
             pass
 
-        try:
-            import winsound
-
-            for freq in range(600, 1600, 50):
-                if self._stop_event.is_set():
-                    return
-                winsound.Beep(freq, 30)
-            for freq in range(1600, 600, -50):
-                if self._stop_event.is_set():
-                    return
-                winsound.Beep(freq, 30)
-        except Exception:
-            return
+        for freq in range(600, 1600, 50):
+            if self._stop_event.is_set():
+                return
+            winsound.Beep(freq, 30)
 
     def _play_unix(self, path: str) -> None:
         for cmd in ("paplay", "aplay", "play"):
             if not shutil.which(cmd):
                 continue
-            player_cmd = [cmd, path] if cmd in {"paplay", "aplay"} else [cmd, path]
             try:
-                proc = subprocess.Popen(player_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen([cmd, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 while proc.poll() is None:
                     if self._stop_event.is_set():
                         proc.terminate()
@@ -334,7 +374,6 @@ class SirenPlayer:
             except OSError:
                 continue
 
-        # fallback universal (som do terminal)
         for _ in range(8):
             if self._stop_event.is_set():
                 return
@@ -342,22 +381,70 @@ class SirenPlayer:
             time.sleep(0.25)
 
 
+# =========================
+# Estado
+# =========================
+
 @dataclass
 class ReceiverState:
     token: Optional[str]
-    player: SirenPlayer = field(default_factory=SirenPlayer)
+    player: SirenPlayer
+    lock: threading.Lock
     last_emit_at: Optional[str] = None
 
-    def emit(self) -> None:
-        self.player.start()
-        self.last_emit_at = _now()
+    @classmethod
+    def create(cls, token: Optional[str]) -> "ReceiverState":
+        return cls(token=token, player=SirenPlayer(), lock=threading.Lock())
+
+    def emit(self) -> str:
+        with self.lock:
+            self.player.start()
+            self.last_emit_at = now_iso()
+            return self.last_emit_at
 
     def stop(self) -> None:
-        self.player.stop()
+        with self.lock:
+            self.player.stop()
 
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {"running": self.player.is_running(), "last_emit_at": self.last_emit_at}
+
+
+# =========================
+# HTTP shared
+# =========================
 
 class BaseHandler(BaseHTTPRequestHandler):
-    server_version = "SirenApp/2.0"
+    server_version = "SirenApp/3.0"
+
+    def _parsed(self) -> urllib.parse.ParseResult:
+        return urllib.parse.urlparse(self.path)
+
+    def _is_local(self) -> bool:
+        return self.client_address[0] in LOCALHOSTS
+
+    def _new_request_id(self) -> str:
+        return self.headers.get("X-Request-Id") or request_id()
+
+    def _wants_json(self) -> bool:
+        accept = self.headers.get("Accept", "")
+        return "application/json" in accept or self.headers.get("X-Requested-With") == "fetch"
+
+    def _read_form(self) -> dict[str, str]:
+        length = int(self.headers.get("Content-Length", "0"))
+        data = self.rfile.read(length).decode("utf-8") if length else ""
+        return dict(urllib.parse.parse_qsl(data))
+
+    def _token_from_request(self) -> Optional[str]:
+        if token := self.headers.get("X-Token"):
+            return token
+        parsed = self._parsed()
+        query = dict(urllib.parse.parse_qsl(parsed.query))
+        if token := query.get("token"):
+            return token
+        form = self._read_form()
+        return form.get("token")
 
     def _write(self, status: int, body: str, content_type: str = "text/html; charset=utf-8") -> None:
         raw = body.encode("utf-8")
@@ -368,170 +455,452 @@ class BaseHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _wants_json(self) -> bool:
-        accept = self.headers.get("Accept", "")
-        return "application/json" in accept or self.headers.get("X-Requested-With") == "fetch"
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        self._write(status, json_text(payload), "application/json; charset=utf-8")
 
     def log_message(self, format: str, *args: object) -> None:
         LOG.info("%s - %s", self.address_string(), format % args)
 
 
+# =========================
+# Receptor server
+# =========================
+
+@dataclass
+class ReceiverServerConfig:
+    bind: str
+    port: int
+    token: Optional[str]
+    controller_url: Optional[str]
+
+
 class ReceiverHandler(BaseHandler):
+    cfg: ReceiverServerConfig
     state: ReceiverState
 
-    def _is_local(self) -> bool:
-        return self.client_address[0] in LOCALHOSTS
-
-    def _read_post(self) -> dict[str, str]:
-        length = int(self.headers.get("Content-Length", "0"))
-        data = self.rfile.read(length).decode("utf-8") if length else ""
-        return dict(urllib.parse.parse_qsl(data))
-
-    def _token_from_request(self) -> Optional[str]:
-        if token := self.headers.get("X-Token"):
-            return token
-        parsed = urllib.parse.urlparse(self.path)
-        query = dict(urllib.parse.parse_qsl(parsed.query))
-        if token := query.get("token"):
-            return token
-        return self._read_post().get("token")
-
     def _authorize(self) -> bool:
-        if self.state.token is None:
+        if self.cfg.token is None:
             return True
-        return _safe_eq(self._token_from_request(), self.state.token)
+        return safe_eq(self._token_from_request(), self.cfg.token)
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urllib.parse.urlparse(self.path)
+        rid = self._new_request_id()
+        parsed = self._parsed()
+
         if parsed.path == "/status":
-            body = json.dumps({"running": self.state.player.is_running(), "last_emit_at": self.state.last_emit_at})
-            self._write(HTTPStatus.OK, body, "application/json")
+            snap = self.state.snapshot()
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "status": "OK",
+                    "message": "Estado do receptor.",
+                    "request_id": rid,
+                    "running": snap["running"],
+                    "last_emit_at": snap["last_emit_at"],
+                    "receiver_port": self.cfg.port,
+                },
+            )
             return
 
-        if parsed.path == "/" and self._is_local():
-            status = "Tocando" if self.state.player.is_running() else "Parada"
-            last = self.state.last_emit_at or "—"
-            body = f"""
-            <html><head><meta charset='utf-8'><title>Receptor</title><style>{_neon_styles()}</style></head>
-            <body data-status-endpoint='/status'><div class='wrap'><div class='card'>
-              <h1 class='title'>🚨 Receptor da Sirene</h1>
-              <p class='subtitle'>Console local do receptor.</p>
-              <div class='info-row'><span>Status: <span class='status-pill {'' if status == 'Tocando' else 'off'}' data-status>{status}</span></span>
-              <span>Último acionamento: <strong data-last>{html.escape(last)}</strong></span></div>
-              <div class='grid'><button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
-              <div class='response' data-message>No receptor, apenas a ação de parada fica disponível.</div>
-            </div></div><script>{_neon_script()}</script></body></html>
-            """
-            self._write(HTTPStatus.OK, body)
+        if parsed.path != "/":
+            self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
             return
 
-        if parsed.path == "/simple":
-            token_hint = html.escape(self._token_from_request() or "")
-            body = f"""
-            <html><head><meta charset='utf-8'><title>Controle</title><style>{_neon_styles()}</style></head>
-            <body data-status-endpoint='/status'><div class='wrap'><div class='card'>
-              <h1 class='title'>🚨 Emitir Sirene</h1>
-              <p class='subtitle'>A página do receptor permite somente parar.</p>
-              <div class='info-row'><span class='status-pill off' data-status>Parada</span></div>
-              <input type='hidden' data-token value='{token_hint}' />
-              <div class='grid'><button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
-              <div class='response' data-message>Para ligar a sirene, use o painel do controlador.</div>
-            </div></div><script>{_neon_script()}</script></body></html>
-            """
-            self._write(HTTPStatus.OK, body)
-            return
+        snap = self.state.snapshot()
+        status_text = "Tocando" if snap["running"] else "Parada"
+        last_emit_at = snap["last_emit_at"] or "—"
 
-        self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
+        controller_block = (
+            f"<div class='links'><strong>Painel controlador:</strong> "
+            f"<a href='{html.escape(self.cfg.controller_url or '')}' target='_blank'>{html.escape(self.cfg.controller_url or 'não configurado')}</a></div>"
+            if self.cfg.controller_url
+            else "<div class='links'><strong>Painel controlador:</strong> não configurado.</div>"
+        )
+
+        body = f"""
+        <div class='info-row'>
+          <span>Papel: <code>RECEPTOR</code></span>
+          <span>Host/porta: <code>{html.escape(self.cfg.bind)}:{self.cfg.port}</code></span>
+          <span>Status: <span class='status-pill {'off' if status_text == 'Parada' else ''}' data-status>{status_text}</span></span>
+          <span>Último acionamento: <strong data-last>{html.escape(last_emit_at)}</strong></span>
+        </div>
+        <div class='grid'>
+          <button class='btn warning' data-action='/stop'>Parar Sirene no Receptor</button>
+        </div>
+        <div class='response' data-message>
+          Este painel é do receptor. A ação de <strong>ligar</strong> deve ser feita no controlador.
+        </div>
+        {controller_block}
+        <div class='response'>
+          Endpoints: <code>GET /status</code> | <code>POST /emit</code> | <code>POST /stop</code>
+        </div>
+        """
+        page = layout_page(
+            title="Receptor da Sirene",
+            subtitle="Nó responsável por tocar o áudio.",
+            banner_class="receiver",
+            banner_text="Você está no RECEPTOR (som local)",
+            body_html=body,
+            status_endpoint="/status",
+        )
+        self._write(HTTPStatus.OK, page)
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urllib.parse.urlparse(self.path)
+        rid = self._new_request_id()
+        parsed = self._parsed()
+
         if parsed.path == "/emit":
             if not self._authorize():
-                body = _json_response(False, "Não autorizado", "Token inválido ou ausente.")
-                self._write(HTTPStatus.UNAUTHORIZED, body, "application/json")
+                self._json(
+                    HTTPStatus.UNAUTHORIZED,
+                    {
+                        "ok": False,
+                        "status": "Não autorizado",
+                        "message": "Token inválido ou ausente.",
+                        "request_id": rid,
+                    },
+                )
                 return
-            self.state.emit()
-            body = _json_response(True, "Ligada", "A sirene foi ligada com sucesso.", last_emit_at=self.state.last_emit_at)
-            self._write(HTTPStatus.OK, body, "application/json")
+            last = self.state.emit()
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "status": "Ligada",
+                    "message": "A sirene foi ligada com sucesso.",
+                    "request_id": rid,
+                    "last_emit_at": last,
+                },
+            )
             return
 
         if parsed.path == "/stop":
             if not self._is_local() and not self._authorize():
-                body = _json_response(False, "Acesso negado", "Somente acesso local ou com token válido.")
-                self._write(HTTPStatus.FORBIDDEN, body, "application/json")
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "status": "Acesso negado",
+                        "message": "Somente acesso local ou token válido.",
+                        "request_id": rid,
+                    },
+                )
                 return
             self.state.stop()
-            body = _json_response(True, "Parada", "A sirene foi parada.", last_emit_at=self.state.last_emit_at)
-            self._write(HTTPStatus.OK, body, "application/json")
+            snap = self.state.snapshot()
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "status": "Parada",
+                    "message": "A sirene foi parada.",
+                    "request_id": rid,
+                    "last_emit_at": snap["last_emit_at"],
+                },
+            )
             return
 
         self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
 
 
-class ControllerHandler(BaseHandler):
-    receiver_url: str
-    token: Optional[str]
+# =========================
+# Cliente do receptor para controlador
+# =========================
 
-    def _build_receiver_request(self, path: str, *, method: str, data: Optional[bytes] = None) -> urllib.request.Request:
-        req = urllib.request.Request(urllib.parse.urljoin(self.receiver_url, path), method=method, data=data)
+@dataclass
+class ReceiverClientResult:
+    ok: bool
+    message: str
+    status: str
+    receiver_status: Optional[int] = None
+    details: Optional[dict[str, Any]] = None
+
+
+class ReceiverClient:
+    def __init__(self, receiver_url: str, token: Optional[str], timeout: float = 4.0) -> None:
+        self.receiver_url = receiver_url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def _request(self, path: str, method: str) -> ReceiverClientResult:
+        rid = request_id()
+        url = urllib.parse.urljoin(self.receiver_url + "/", path.lstrip("/"))
+        req = urllib.request.Request(url, method=method, data=b"ts=1" if method == "POST" else None)
         req.add_header("Accept", "application/json")
         req.add_header("X-Requested-With", "fetch")
+        req.add_header("X-Request-Id", rid)
         req.add_header("ngrok-skip-browser-warning", "true")
         if self.token:
             req.add_header("X-Token", self.token)
-        return req
 
-    def _send_action(self, path: str) -> tuple[bool, str]:
-        req = self._build_receiver_request(path, method="POST", data=b"ts=1")
         try:
-            with urllib.request.urlopen(req, timeout=4) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-                return bool(payload.get("ok")), str(payload.get("message", ""))
-        except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
-            return False, f"Erro ao contactar receptor: {exc}"
+                return ReceiverClientResult(
+                    ok=bool(payload.get("ok", True)),
+                    message=str(payload.get("message", "OK")),
+                    status=str(payload.get("status", "OK")),
+                    receiver_status=resp.status,
+                    details=payload,
+                )
+        except urllib.error.HTTPError as exc:
+            body = ""
+            parsed: dict[str, Any] = {}
+            try:
+                body = exc.read().decode("utf-8")
+                parsed = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                parsed = {"raw": body}
 
-    def _fetch_status(self) -> tuple[bool, dict[str, object]]:
-        req = self._build_receiver_request("/status", method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-                return True, payload
-        except (urllib.error.URLError, socket.timeout, json.JSONDecodeError) as exc:
-            return False, {"running": False, "last_emit_at": None, "error": f"Erro ao consultar receptor: {exc}"}
+            msg = parsed.get("message") if isinstance(parsed, dict) else None
+            if not msg:
+                if exc.code == 401:
+                    msg = "Não autorizado no receptor (token inválido ou ausente)."
+                elif exc.code == 403:
+                    msg = "Acesso negado no receptor (ação proibida)."
+                elif exc.code == 404:
+                    msg = "Endpoint não encontrado no receptor."
+                else:
+                    msg = f"Erro HTTP no receptor: {exc.code}."
+            return ReceiverClientResult(False, str(msg), "Falha", receiver_status=exc.code, details=parsed)
+        except urllib.error.URLError as exc:
+            return ReceiverClientResult(False, f"Receptor indisponível: {exc.reason}", "Falha", details={"error": str(exc)})
+        except socket.timeout:
+            return ReceiverClientResult(False, "Timeout ao contactar receptor.", "Falha")
+        except json.JSONDecodeError:
+            return ReceiverClientResult(False, "Resposta inválida do receptor.", "Falha")
+
+    def status(self) -> ReceiverClientResult:
+        return self._request("/status", "GET")
+
+    def emit(self) -> ReceiverClientResult:
+        return self._request("/emit", "POST")
+
+    def stop(self) -> ReceiverClientResult:
+        return self._request("/stop", "POST")
+
+
+# =========================
+# Controlador server
+# =========================
+
+@dataclass
+class ControllerServerConfig:
+    bind: str
+    port: int
+    receiver_url: str
+    token: Optional[str]
+
+
+class ControllerHandler(BaseHandler):
+    cfg: ControllerServerConfig
+
+    def _client(self) -> ReceiverClient:
+        return ReceiverClient(self.cfg.receiver_url, self.cfg.token)
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/status":
-            ok, payload = self._fetch_status()
-            self._write(HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY, json.dumps(payload, ensure_ascii=False), "application/json")
+        rid = self._new_request_id()
+        parsed = self._parsed()
+
+        if parsed.path == "/status":
+            result = self._client().status()
+            if not result.ok:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {
+                        "ok": False,
+                        "status": "Falha",
+                        "message": result.message,
+                        "request_id": rid,
+                        "running": False,
+                        "last_emit_at": None,
+                        "receiver_status": result.receiver_status,
+                        "receiver_url": self.cfg.receiver_url,
+                        "details": result.details,
+                    },
+                )
+                return
+
+            details = result.details or {}
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "status": "OK",
+                    "message": "Estado consultado no receptor.",
+                    "request_id": rid,
+                    "running": bool(details.get("running", False)),
+                    "last_emit_at": details.get("last_emit_at"),
+                    "receiver_status": result.receiver_status,
+                    "receiver_url": self.cfg.receiver_url,
+                },
+            )
             return
 
-        if self.path != "/":
-            self._write(HTTPStatus.NOT_FOUND, "Not found")
+        if parsed.path != "/":
+            self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
             return
+
         body = f"""
-        <html><head><meta charset='utf-8'><title>Controlador</title><style>{_neon_styles()}</style></head>
-        <body data-status-endpoint='/status'>
-          <div class='wrap'><div class='card'>
-            <h1 class='title'>🚨 Controlador Central</h1>
-            <p class='subtitle'>Controle remoto robusto do receptor.</p>
-            <div class='info-row'><span>Status: <span class='status-pill off' data-status>Parada</span></span>
-            <span>Último acionamento: <strong data-last>—</strong></span></div>
-            <div class='grid'><button class='btn primary' data-action='/emit'>Ligar Sirene</button>
-            <button class='btn secondary' data-action='/stop'>Parar Sirene</button></div>
-            <div class='response' data-message>Pronto para enviar comandos ao receptor.</div>
-          </div></div><script>{_neon_script()}</script>
-        </body></html>
+        <div class='info-row'>
+          <span>Papel: <code>CONTROLADOR</code></span>
+          <span>Host/porta: <code>{html.escape(self.cfg.bind)}:{self.cfg.port}</code></span>
+          <span>Receptor alvo: <code>{html.escape(self.cfg.receiver_url)}</code></span>
+          <span>Status: <span class='status-pill off' data-status>Parada</span></span>
+          <span>Último acionamento: <strong data-last>—</strong></span>
+        </div>
+        <div class='grid'>
+          <button class='btn primary' data-action='/emit'>Ligar Sirene</button>
+          <button class='btn secondary' data-action='/stop'>Parar Sirene</button>
+        </div>
+        <div class='response' data-message>Pronto para enviar comandos ao receptor.</div>
+        <div class='response'>
+          Endpoints: <code>GET /status</code> | <code>POST /emit</code> | <code>POST /stop</code>
+        </div>
         """
-        self._write(HTTPStatus.OK, body)
+        page = layout_page(
+            title="Controlador Central",
+            subtitle="Painel remoto para emitir/parar a sirene.",
+            banner_class="controller",
+            banner_text="Você está no CONTROLADOR (comando remoto)",
+            body_html=body,
+            status_endpoint="/status",
+        )
+        self._write(HTTPStatus.OK, page)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path not in {"/emit", "/stop"}:
-            self._write(HTTPStatus.NOT_FOUND, "Not found")
+        rid = self._new_request_id()
+        parsed = self._parsed()
+
+        if parsed.path not in {"/emit", "/stop"}:
+            self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
             return
-        ok, message = self._send_action(self.path)
-        status = "Ligada" if self.path == "/emit" and ok else "Parada" if ok else "Falha"
-        body = _json_response(ok, status, message)
-        self._write(HTTPStatus.OK if ok else HTTPStatus.BAD_GATEWAY, body, "application/json")
+
+        result = self._client().emit() if parsed.path == "/emit" else self._client().stop()
+        if not result.ok:
+            self._json(
+                HTTPStatus.BAD_GATEWAY,
+                {
+                    "ok": False,
+                    "status": "Falha",
+                    "message": result.message,
+                    "request_id": rid,
+                    "receiver_status": result.receiver_status,
+                    "receiver_url": self.cfg.receiver_url,
+                    "details": result.details,
+                },
+            )
+            return
+
+        last_emit = (result.details or {}).get("last_emit_at")
+        status = "Ligada" if parsed.path == "/emit" else "Parada"
+        self._json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "status": status,
+                "message": result.message,
+                "request_id": rid,
+                "last_emit_at": last_emit,
+                "receiver_status": result.receiver_status,
+                "receiver_url": self.cfg.receiver_url,
+            },
+        )
+
+
+# =========================
+# Runtime helpers
+# =========================
+
+class NgrokManager:
+    def __init__(self) -> None:
+        self.processes: list[subprocess.Popen[bytes]] = []
+
+    @staticmethod
+    def _addr_port(addr: str) -> Optional[int]:
+        if not isinstance(addr, str) or not addr:
+            return None
+        parsed = urllib.parse.urlparse(addr)
+        if parsed.port:
+            return parsed.port
+        if ":" in addr:
+            try:
+                return int(addr.rsplit(":", 1)[1])
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _pick_tunnel_url(cls, tunnels: list[dict[str, Any]], port: int) -> Optional[str]:
+        """Seleciona o túnel da porta alvo, com preferência para HTTPS."""
+        matched: list[dict[str, Any]] = []
+        for tunnel in tunnels:
+            cfg = tunnel.get("config") if isinstance(tunnel, dict) else None
+            addr = cfg.get("addr", "") if isinstance(cfg, dict) else ""
+            if cls._addr_port(addr) == port:
+                matched.append(tunnel)
+
+        if not matched:
+            return None
+
+        https = [t for t in matched if str(t.get("public_url", "")).startswith("https://")]
+        chosen = https[0] if https else matched[0]
+        public = chosen.get("public_url")
+        return public if isinstance(public, str) else None
+
+    @staticmethod
+    def _tunnel_addrs(tunnels: list[dict[str, Any]]) -> list[str]:
+        addrs: list[str] = []
+        for tunnel in tunnels:
+            cfg = tunnel.get("config") if isinstance(tunnel, dict) else None
+            addr = cfg.get("addr") if isinstance(cfg, dict) else None
+            if isinstance(addr, str):
+                addrs.append(addr)
+        return addrs
+
+    def start_tunnel(self, port: int) -> Optional[str]:
+        try:
+            proc = subprocess.Popen(["ngrok", "http", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.processes.append(proc)
+            time.sleep(0.25)
+            if proc.poll() is not None:
+                LOG.warning(
+                    "Processo ngrok para porta %s encerrou cedo (exit=%s). Verifique limite de túneis/conta.",
+                    port,
+                    proc.returncode,
+                )
+        except FileNotFoundError:
+            LOG.warning("Ngrok não encontrado. Continuando sem túnel público.")
+            return None
+
+        endpoint = "http://127.0.0.1:4040/api/tunnels"
+        last_addrs: list[str] = []
+        for _ in range(40):
+            try:
+                with urllib.request.urlopen(endpoint, timeout=1) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                tunnels = data.get("tunnels", [])
+                if isinstance(tunnels, list):
+                    last_addrs = self._tunnel_addrs(tunnels)
+                    public = self._pick_tunnel_url(tunnels, port)
+                    if public:
+                        return public
+            except (urllib.error.URLError, json.JSONDecodeError, socket.timeout):
+                pass
+            time.sleep(0.35)
+
+        LOG.warning(
+            "Ngrok iniciou, mas URL pública da porta %s não foi detectada. Túneis vistos: %s",
+            port,
+            ", ".join(last_addrs) if last_addrs else "nenhum",
+        )
+        return None
+
+    def stop_all(self) -> None:
+        for proc in self.processes:
+            if proc.poll() is None:
+                proc.terminate()
 
 
 class ServerRuntime:
@@ -539,142 +908,156 @@ class ServerRuntime:
         self.server = server
 
     def serve_forever(self) -> None:
-        def _shutdown(*_: object) -> None:
-            LOG.info("Encerrando servidor...")
-            self.server.shutdown()
-
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, _shutdown)
-            signal.signal(signal.SIGTERM, _shutdown)
         self.server.serve_forever()
 
 
-class ControllerServer:
-    def __init__(self, bind: str, port: int, receiver_url: str, token: Optional[str], ngrok: bool) -> None:
-        self.bind = bind
-        self.port = port
-        self.receiver_url = receiver_url.rstrip("/")
-        self.token = token
-        self.ngrok = ngrok
+# =========================
+# CLI e execução
+# =========================
 
-    def _start_ngrok(self) -> Optional[str]:
-        try:
-            subprocess.Popen(["ngrok", "http", str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            LOG.warning("Ngrok não encontrado. Use --no-ngrok ou instale o binário.")
-            return None
+@dataclass
+class RuntimeConfig:
+    mode: str
+    bind: str
+    receiver_port: int
+    controller_port: int
+    receiver_url: str
+    token: Optional[str]
+    ngrok: bool
+    log_level: str
 
-        url = "http://127.0.0.1:4040/api/tunnels"
-        for _ in range(16):
-            try:
-                with urllib.request.urlopen(url, timeout=1) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                tunnels = data.get("tunnels", [])
-                if tunnels:
-                    return tunnels[0].get("public_url")
-            except (urllib.error.URLError, socket.timeout, json.JSONDecodeError):
-                time.sleep(0.4)
-        LOG.warning("Ngrok iniciou, mas o link público do controlador não foi obtido automaticamente.")
-        return None
 
-    def serve(self) -> None:
-        handler = type("ConfiguredControllerHandler", (ControllerHandler,), {"receiver_url": self.receiver_url, "token": self.token})
-        server = ThreadingHTTPServer((self.bind, self.port), handler)
-        LOG.info("Controlador ativo em http://%s:%d", self.bind, self.port)
-        if self.ngrok:
-            public_url = self._start_ngrok()
-            if public_url:
-                LOG.info("Ngrok do controlador: %s", public_url)
+class AppServer:
+    @staticmethod
+    def start_receiver(cfg: RuntimeConfig, controller_url: Optional[str]) -> None:
+        state = ReceiverState.create(cfg.token)
+        receiver_cfg = ReceiverServerConfig(cfg.bind, cfg.receiver_port, cfg.token, controller_url)
+        handler = type("ConfiguredReceiverHandler", (ReceiverHandler,), {"cfg": receiver_cfg, "state": state})
+        server = ThreadingHTTPServer((cfg.bind, cfg.receiver_port), handler)
+        LOG.info("Receptor ativo em http://%s:%d", cfg.bind, cfg.receiver_port)
+        ServerRuntime(server).serve_forever()
+
+    @staticmethod
+    def start_controller(cfg: RuntimeConfig) -> None:
+        controller_cfg = ControllerServerConfig(cfg.bind, cfg.controller_port, cfg.receiver_url, cfg.token)
+        handler = type("ConfiguredControllerHandler", (ControllerHandler,), {"cfg": controller_cfg})
+        server = ThreadingHTTPServer((cfg.bind, cfg.controller_port), handler)
+        LOG.info("Controlador ativo em http://%s:%d", cfg.bind, cfg.controller_port)
+        LOG.info("Controlador aponta para receptor: %s", cfg.receiver_url)
         ServerRuntime(server).serve_forever()
 
 
-class ReceiverServer:
-    def __init__(self, bind: str, port: int, token: Optional[str], ngrok: bool) -> None:
-        self.bind = bind
-        self.port = port
-        self.token = token
-        self.ngrok = ngrok
-        self._ngrok_process: Optional[subprocess.Popen[bytes]] = None
-
-    def _start_ngrok(self) -> Optional[str]:
-        try:
-            self._ngrok_process = subprocess.Popen(["ngrok", "http", str(self.port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            LOG.warning("Ngrok não encontrado. Use --no-ngrok ou instale o binário.")
-            return None
-
-        url = "http://127.0.0.1:4040/api/tunnels"
-        for _ in range(16):
-            try:
-                with urllib.request.urlopen(url, timeout=1) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                tunnels = data.get("tunnels", [])
-                if tunnels:
-                    return tunnels[0].get("public_url")
-            except (urllib.error.URLError, socket.timeout, json.JSONDecodeError):
-                time.sleep(0.4)
-        LOG.warning("Ngrok iniciou, mas o link público não foi obtido automaticamente.")
-        return None
-
-    def serve(self) -> None:
-        state = ReceiverState(self.token)
-        handler = type("ConfiguredReceiverHandler", (ReceiverHandler,), {"state": state})
-        server = ThreadingHTTPServer((self.bind, self.port), handler)
-        LOG.info("Receptor ativo em http://%s:%d", self.bind, self.port)
-        LOG.info("Parada local em: http://localhost:%d", self.port)
-        if self.ngrok:
-            public_url = self._start_ngrok()
-            if public_url:
-                LOG.info("Ngrok iniciado: %s", public_url)
-                LOG.info("Se o túnel mostrar aviso de segurança no navegador, isso é comportamento padrão do ngrok em domínios gratuitos.")
-        ServerRuntime(server).serve_forever()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Sirene remota (arquivo único).")
+    parser.add_argument("--mode", choices=["receiver", "controller", "both"], default=os.getenv("SIREN_MODE", "both"))
+    parser.add_argument("--bind", default=os.getenv("SIREN_BIND", "0.0.0.0"))
+    parser.add_argument("--receiver-port", type=int, default=int(os.getenv("SIREN_RECEIVER_PORT", "5001")))
+    parser.add_argument("--controller-port", type=int, default=int(os.getenv("SIREN_CONTROLLER_PORT", "5000")))
+    parser.add_argument("--receiver-url", default=os.getenv("SIREN_RECEIVER_URL", ""))
+    parser.add_argument("--token", default=os.getenv("SIREN_TOKEN"))
+    parser.add_argument("--ngrok", action="store_true", default=os.getenv("SIREN_NGROK", "1") == "1")
+    parser.add_argument("--no-ngrok", action="store_true")
+    parser.add_argument("--log-level", default=os.getenv("SIREN_LOG_LEVEL", "INFO"))
+    return parser
 
 
-def _find_available_port(preferred: int) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind(("", preferred))
-            return preferred
-        except OSError:
-            sock.bind(("", 0))
-            return int(sock.getsockname()[1])
+def resolve_config(args: argparse.Namespace) -> RuntimeConfig:
+    ngrok = bool(args.ngrok and not args.no_ngrok)
+
+    receiver_port = args.receiver_port if args.receiver_port else find_available_port(5001)
+    controller_port = args.controller_port if args.controller_port else find_available_port(5000)
+
+    receiver_url = args.receiver_url.strip()
+    if not receiver_url and args.mode in {"controller", "both"}:
+        receiver_url = f"http://127.0.0.1:{receiver_port}"
+
+    if args.mode == "controller" and not receiver_url:
+        raise SystemExit("--receiver-url é obrigatório no modo controller")
+
+    if args.mode == "controller":
+        parsed = urllib.parse.urlparse(receiver_url)
+        if parsed.hostname not in LOCALHOSTS and not args.token:
+            LOG.warning("Controlador remoto sem token: isso é inseguro")
+
+    return RuntimeConfig(
+        mode=args.mode,
+        bind=args.bind,
+        receiver_port=receiver_port,
+        controller_port=controller_port,
+        receiver_url=receiver_url,
+        token=args.token,
+        ngrok=ngrok,
+        log_level=args.log_level,
+    )
 
 
-def _detect_local_ip() -> str:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        sock.close()
+def print_effective_config(cfg: RuntimeConfig) -> None:
+    LOG.info("Configuração efetiva:")
+    LOG.info("  mode=%s", cfg.mode)
+    LOG.info("  bind=%s", cfg.bind)
+    LOG.info("  receiver_port=%d", cfg.receiver_port)
+    LOG.info("  controller_port=%d", cfg.controller_port)
+    LOG.info("  receiver_url=%s", cfg.receiver_url)
+    LOG.info("  token=%s", mask_secret(cfg.token))
+    LOG.info("  ngrok=%s", cfg.ngrok)
+
+
+def run_both(cfg: RuntimeConfig) -> None:
+    ngrok_mgr = NgrokManager()
+    receiver_public = None
+    controller_public = None
+
+    if cfg.ngrok:
+        receiver_public = ngrok_mgr.start_tunnel(cfg.receiver_port)
+        controller_public = ngrok_mgr.start_tunnel(cfg.controller_port)
+
+    local_ip = detect_local_ip()
+    LOG.info("Inicialização modo BOTH")
+    LOG.info("Receptor local: http://localhost:%d", cfg.receiver_port)
+    LOG.info("Controlador local: http://localhost:%d", cfg.controller_port)
+    if local_ip not in LOCALHOSTS:
+        LOG.info("Receptor na rede local: http://%s:%d", local_ip, cfg.receiver_port)
+        LOG.info("Controlador na rede local: http://%s:%d", local_ip, cfg.controller_port)
+    if receiver_public:
+        LOG.info("Receptor público (ngrok): %s", receiver_public)
+    if controller_public:
+        LOG.info("Controlador público (ngrok): %s", controller_public)
+
+    def _shutdown(*_: Any) -> None:
+        LOG.info("Encerrando...")
+        ngrok_mgr.stop_all()
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    receiver_thread = threading.Thread(
+        target=AppServer.start_receiver,
+        args=(cfg, controller_public or f"http://127.0.0.1:{cfg.controller_port}"),
+        daemon=True,
+        name="receiver-server",
+    )
+    receiver_thread.start()
+    time.sleep(0.5)
+
+    AppServer.start_controller(cfg)
 
 
 def main() -> None:
-    bind = "0.0.0.0"
-    controller_port = _find_available_port(5000)
-    receiver_port = _find_available_port(5001)
-    token = None
-    ngrok = True
-    receiver_url = f"http://127.0.0.1:{receiver_port}"
+    parser = build_parser()
+    args = parser.parse_args()
 
-    local_ip = _detect_local_ip()
-    LOG.info("Inicialização automática ativa (sem argumentos).")
-    LOG.info("Receptor local: http://localhost:%d", receiver_port)
-    LOG.info("Controlador local: http://localhost:%d", controller_port)
-    if local_ip not in LOCALHOSTS:
-        LOG.info("Receptor na rede local: http://%s:%d", local_ip, receiver_port)
-        LOG.info("Controlador na rede local: http://%s:%d", local_ip, controller_port)
+    configure_logging(args.log_level)
+    cfg = resolve_config(args)
+    print_effective_config(cfg)
 
-    receiver = ReceiverServer(bind, receiver_port, token, ngrok)
-    receiver_thread = threading.Thread(target=receiver.serve, name="receiver-server", daemon=True)
-    receiver_thread.start()
-    time.sleep(0.4)
-
-    controller = ControllerServer(bind, controller_port, receiver_url, token, ngrok)
-    controller.serve()
+    if cfg.mode == "receiver":
+        AppServer.start_receiver(cfg, controller_url=None)
+        return
+    if cfg.mode == "controller":
+        AppServer.start_controller(cfg)
+        return
+    run_both(cfg)
 
 
 if __name__ == "__main__":
