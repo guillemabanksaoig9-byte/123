@@ -410,6 +410,9 @@ class ReceiverState:
         with self.lock:
             return {"running": self.player.is_running(), "last_emit_at": self.last_emit_at}
 
+# =========================
+# HTTP shared
+# =========================
 
 # =========================
 # HTTP shared
@@ -817,6 +820,32 @@ class NgrokManager:
     def __init__(self) -> None:
         self.processes: list[subprocess.Popen[bytes]] = []
 
+    @staticmethod
+    def _pick_tunnel_url(tunnels: list[dict[str, Any]], port: int) -> Optional[str]:
+        """Seleciona o túnel que realmente aponta para a porta alvo.
+
+        O endpoint do ngrok pode retornar vários túneis (inclusive antigos) e,
+        se pegarmos sempre o primeiro, receptor e controlador podem receber o
+        mesmo link por engano.
+        """
+        target_suffix = f":{port}"
+
+        matched: list[dict[str, Any]] = []
+        for tunnel in tunnels:
+            cfg = tunnel.get("config") if isinstance(tunnel, dict) else None
+            addr = cfg.get("addr", "") if isinstance(cfg, dict) else ""
+            if isinstance(addr, str) and addr.endswith(target_suffix):
+                matched.append(tunnel)
+
+        if not matched:
+            return None
+
+        # Preferir HTTPS quando existir para compartilhamento externo.
+        https = [t for t in matched if str(t.get("public_url", "")).startswith("https://")]
+        chosen = https[0] if https else matched[0]
+        public = chosen.get("public_url")
+        return public if isinstance(public, str) else None
+
     def start_tunnel(self, port: int) -> Optional[str]:
         try:
             proc = subprocess.Popen(["ngrok", "http", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -831,14 +860,14 @@ class NgrokManager:
                 with urllib.request.urlopen(endpoint, timeout=1) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 tunnels = data.get("tunnels", [])
-                if tunnels:
-                    public = tunnels[0].get("public_url")
-                    if isinstance(public, str):
+                if isinstance(tunnels, list):
+                    public = self._pick_tunnel_url(tunnels, port)
+                    if public:
                         return public
             except (urllib.error.URLError, json.JSONDecodeError, socket.timeout):
                 time.sleep(0.35)
 
-        LOG.warning("Ngrok iniciado, mas URL pública não foi detectada automaticamente.")
+        LOG.warning("Ngrok iniciou, mas URL pública da porta %s não foi detectada automaticamente.", port)
         return None
 
     def stop_all(self) -> None:
