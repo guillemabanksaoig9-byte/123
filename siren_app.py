@@ -602,6 +602,7 @@ class ReceiverServer:
             public_url = self._start_ngrok()
             if public_url:
                 LOG.info("Ngrok iniciado: %s", public_url)
+                LOG.info("Se o túnel mostrar aviso de segurança no navegador, isso é comportamento padrão do ngrok em domínios gratuitos.")
         ServerRuntime(server).serve_forever()
 
 
