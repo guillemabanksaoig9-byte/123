@@ -11,7 +11,6 @@ Melhorias implementadas:
 
 from __future__ import annotations
 
-import argparse
 import hmac
 import html
 import json
@@ -23,7 +22,6 @@ import signal
 import socket
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -545,8 +543,9 @@ class ServerRuntime:
             LOG.info("Encerrando servidor...")
             self.server.shutdown()
 
-        signal.signal(signal.SIGINT, _shutdown)
-        signal.signal(signal.SIGTERM, _shutdown)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, _shutdown)
+            signal.signal(signal.SIGTERM, _shutdown)
         self.server.serve_forever()
 
 
@@ -631,34 +630,51 @@ class ReceiverServer:
         ServerRuntime(server).serve_forever()
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Aplicativo de sirene remota")
-    sub = parser.add_subparsers(dest="mode", required=True)
+def _find_available_port(preferred: int) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", preferred))
+            return preferred
+        except OSError:
+            sock.bind(("", 0))
+            return int(sock.getsockname()[1])
 
-    controller = sub.add_parser("controller", help="Inicia o Controlador Central")
-    controller.add_argument("--bind", default="0.0.0.0")
-    controller.add_argument("--port", type=int, default=5000)
-    controller.add_argument("--receiver-url", required=True, help="URL base do receptor (ex: http://IP:5001)")
-    controller.add_argument("--token", help="Token compartilhado com o receptor")
-    controller.add_argument("--no-ngrok", dest="ngrok", action="store_false", default=True)
 
-    receiver = sub.add_parser("receiver", help="Inicia o Receptor")
-    receiver.add_argument("--bind", default="0.0.0.0")
-    receiver.add_argument("--port", type=int, default=5001)
-    receiver.add_argument("--token", help="Token compartilhado para autorizar emissão")
-    receiver.add_argument("--no-ngrok", dest="ngrok", action="store_false", default=True)
-
-    if len(sys.argv) == 1:
-        return parser.parse_args(["receiver"])
-    return parser.parse_args()
+def _detect_local_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
 
 
 def main() -> None:
-    args = parse_args()
-    if args.mode == "controller":
-        ControllerServer(args.bind, args.port, args.receiver_url, args.token, args.ngrok).serve()
-    elif args.mode == "receiver":
-        ReceiverServer(args.bind, args.port, args.token, args.ngrok).serve()
+    bind = "0.0.0.0"
+    controller_port = _find_available_port(5000)
+    receiver_port = _find_available_port(5001)
+    token = None
+    ngrok = True
+    receiver_url = f"http://127.0.0.1:{receiver_port}"
+
+    local_ip = _detect_local_ip()
+    LOG.info("Inicialização automática ativa (sem argumentos).")
+    LOG.info("Receptor local: http://localhost:%d", receiver_port)
+    LOG.info("Controlador local: http://localhost:%d", controller_port)
+    if local_ip not in LOCALHOSTS:
+        LOG.info("Receptor na rede local: http://%s:%d", local_ip, receiver_port)
+        LOG.info("Controlador na rede local: http://%s:%d", local_ip, controller_port)
+
+    receiver = ReceiverServer(bind, receiver_port, token, ngrok)
+    receiver_thread = threading.Thread(target=receiver.serve, name="receiver-server", daemon=True)
+    receiver_thread.start()
+    time.sleep(0.4)
+
+    controller = ControllerServer(bind, controller_port, receiver_url, token, ngrok)
+    controller.serve()
 
 
 if __name__ == "__main__":
