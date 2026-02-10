@@ -410,9 +410,6 @@ class ReceiverState:
         with self.lock:
             return {"running": self.player.is_running(), "last_emit_at": self.last_emit_at}
 
-# =========================
-# HTTP shared
-# =========================
 
 # =========================
 # HTTP shared
@@ -821,53 +818,83 @@ class NgrokManager:
         self.processes: list[subprocess.Popen[bytes]] = []
 
     @staticmethod
-    def _pick_tunnel_url(tunnels: list[dict[str, Any]], port: int) -> Optional[str]:
-        """Seleciona o túnel que realmente aponta para a porta alvo.
+    def _addr_port(addr: str) -> Optional[int]:
+        if not isinstance(addr, str) or not addr:
+            return None
+        parsed = urllib.parse.urlparse(addr)
+        if parsed.port:
+            return parsed.port
+        if ":" in addr:
+            try:
+                return int(addr.rsplit(":", 1)[1])
+            except ValueError:
+                return None
+        return None
 
-        O endpoint do ngrok pode retornar vários túneis (inclusive antigos) e,
-        se pegarmos sempre o primeiro, receptor e controlador podem receber o
-        mesmo link por engano.
-        """
-        target_suffix = f":{port}"
-
+    @classmethod
+    def _pick_tunnel_url(cls, tunnels: list[dict[str, Any]], port: int) -> Optional[str]:
+        """Seleciona o túnel da porta alvo, com preferência para HTTPS."""
         matched: list[dict[str, Any]] = []
         for tunnel in tunnels:
             cfg = tunnel.get("config") if isinstance(tunnel, dict) else None
             addr = cfg.get("addr", "") if isinstance(cfg, dict) else ""
-            if isinstance(addr, str) and addr.endswith(target_suffix):
+            if cls._addr_port(addr) == port:
                 matched.append(tunnel)
 
         if not matched:
             return None
 
-        # Preferir HTTPS quando existir para compartilhamento externo.
         https = [t for t in matched if str(t.get("public_url", "")).startswith("https://")]
         chosen = https[0] if https else matched[0]
         public = chosen.get("public_url")
         return public if isinstance(public, str) else None
 
+    @staticmethod
+    def _tunnel_addrs(tunnels: list[dict[str, Any]]) -> list[str]:
+        addrs: list[str] = []
+        for tunnel in tunnels:
+            cfg = tunnel.get("config") if isinstance(tunnel, dict) else None
+            addr = cfg.get("addr") if isinstance(cfg, dict) else None
+            if isinstance(addr, str):
+                addrs.append(addr)
+        return addrs
+
     def start_tunnel(self, port: int) -> Optional[str]:
         try:
             proc = subprocess.Popen(["ngrok", "http", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.processes.append(proc)
+            time.sleep(0.25)
+            if proc.poll() is not None:
+                LOG.warning(
+                    "Processo ngrok para porta %s encerrou cedo (exit=%s). Verifique limite de túneis/conta.",
+                    port,
+                    proc.returncode,
+                )
         except FileNotFoundError:
             LOG.warning("Ngrok não encontrado. Continuando sem túnel público.")
             return None
 
         endpoint = "http://127.0.0.1:4040/api/tunnels"
-        for _ in range(24):
+        last_addrs: list[str] = []
+        for _ in range(40):
             try:
                 with urllib.request.urlopen(endpoint, timeout=1) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 tunnels = data.get("tunnels", [])
                 if isinstance(tunnels, list):
+                    last_addrs = self._tunnel_addrs(tunnels)
                     public = self._pick_tunnel_url(tunnels, port)
                     if public:
                         return public
             except (urllib.error.URLError, json.JSONDecodeError, socket.timeout):
-                time.sleep(0.35)
+                pass
+            time.sleep(0.35)
 
-        LOG.warning("Ngrok iniciou, mas URL pública da porta %s não foi detectada automaticamente.", port)
+        LOG.warning(
+            "Ngrok iniciou, mas URL pública da porta %s não foi detectada. Túneis vistos: %s",
+            port,
+            ", ".join(last_addrs) if last_addrs else "nenhum",
+        )
         return None
 
     def stop_all(self) -> None:
