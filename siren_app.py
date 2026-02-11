@@ -577,10 +577,9 @@ class ReceiverHandler(BaseHandler):
         last_emit_at = snap["last_emit_at"] or "—"
 
         controller_block = (
-            f"<div class='links'><strong>Painel controlador:</strong> "
-            f"<a href='{html.escape(self.cfg.controller_url or '')}' target='_blank'>{html.escape(self.cfg.controller_url or 'não configurado')}</a></div>"
+            f"<div class='response links'><a href='{html.escape(self.cfg.controller_url or '')}' target='_blank'>Abrir controlador</a></div>"
             if self.cfg.controller_url
-            else "<div class='links'><strong>Painel controlador:</strong> não configurado.</div>"
+            else ""
         )
 
         body = f"""
@@ -590,32 +589,17 @@ class ReceiverHandler(BaseHandler):
           <span>Status: <span class='status-pill {'off' if status_text == 'Parada' else ''}' data-status>{status_text}</span></span>
           <span>Último acionamento: <strong data-last>{html.escape(last_emit_at)}</strong></span>
         </div>
-        <div class='grid two'>
-          <div class='panel'>
-            <h3>Função do receptor</h3>
-            <p>Executa o som da sirene localmente e mantém o status em tempo real.</p>
-          </div>
-          <div class='panel'>
-            <h3>Conexão</h3>
-            <p>As ações de ligar/parar são recebidas do controlador por API HTTP.</p>
-          </div>
-        </div>
         <div class='grid'>
           <button class='btn warning' data-action='/stop'>Parar Sirene no Receptor</button>
         </div>
-        <div class='response' data-message>
-          Este painel é do receptor. A ação de <strong>ligar</strong> deve ser feita no controlador.
-        </div>
+        <div class='response' data-message>Receptor local ativo.</div>
         {controller_block}
-        <div class='response'>
-          Endpoints: <code>GET /status</code> | <code>POST /emit</code> | <code>POST /stop</code>
-        </div>
         """
         page = layout_page(
             title="Receptor da Sirene",
-            subtitle="Nó responsável por tocar o áudio.",
+            subtitle="Som local.",
             banner_class="receiver",
-            banner_text="Você está no RECEPTOR (som local)",
+            banner_text="RECEPTOR",
             body_html=body,
             status_endpoint="/status",
         )
@@ -944,7 +928,48 @@ class NgrokManager:
                 addrs.append(addr)
         return addrs
 
+    @staticmethod
+    def _fetch_tunnels(endpoint: str) -> list[dict[str, Any]]:
+        with urllib.request.urlopen(endpoint, timeout=1) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tunnels = data.get("tunnels", [])
+        return tunnels if isinstance(tunnels, list) else []
+
+    @staticmethod
+    def _create_tunnel(endpoint: str, port: int) -> bool:
+        payload = json.dumps(
+            {
+                "name": f"siren-controller-{port}",
+                "addr": str(port),
+                "proto": "http",
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2):
+                return True
+        except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout):
+            return False
+
     def start_tunnel(self, port: int) -> Optional[str]:
+        endpoint = "http://127.0.0.1:4040/api/tunnels"
+
+        try:
+            tunnels = self._fetch_tunnels(endpoint)
+            public = self._pick_tunnel_url(tunnels, port)
+            if public:
+                LOG.info("Reutilizando túnel ngrok existente para porta %d", port)
+                return public
+            if tunnels and self._create_tunnel(endpoint, port):
+                LOG.info("Criado túnel ngrok via API local para porta %d", port)
+        except (urllib.error.URLError, json.JSONDecodeError, socket.timeout):
+            pass
+
         try:
             proc = subprocess.Popen(["ngrok", "http", str(port)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.processes.append(proc)
@@ -959,18 +984,16 @@ class NgrokManager:
             LOG.warning("Ngrok não encontrado. Continuando sem túnel público.")
             return None
 
-        endpoint = "http://127.0.0.1:4040/api/tunnels"
         last_addrs: list[str] = []
         for _ in range(40):
             try:
-                with urllib.request.urlopen(endpoint, timeout=1) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                tunnels = data.get("tunnels", [])
-                if isinstance(tunnels, list):
-                    last_addrs = self._tunnel_addrs(tunnels)
-                    public = self._pick_tunnel_url(tunnels, port)
-                    if public:
-                        return public
+                tunnels = self._fetch_tunnels(endpoint)
+                last_addrs = self._tunnel_addrs(tunnels)
+                public = self._pick_tunnel_url(tunnels, port)
+                if public:
+                    return public
+                if tunnels and self._create_tunnel(endpoint, port):
+                    time.sleep(0.2)
             except (urllib.error.URLError, json.JSONDecodeError, socket.timeout):
                 pass
             time.sleep(0.35)
