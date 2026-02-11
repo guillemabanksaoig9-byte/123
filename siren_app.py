@@ -113,13 +113,15 @@ def neon_styles() -> str:
     return """
     :root {
       color-scheme: dark;
-      --card: rgba(13, 18, 32, 0.72);
-      --card-border: rgba(255, 255, 255, 0.08);
+      --card: rgba(10, 14, 26, 0.8);
+      --card-border: rgba(255, 255, 255, 0.1);
       --accent: #ff2d55;
       --text: #f8fafc;
       --muted: #8b98a7;
       --receiver: #0ea5e9;
       --controller: #a855f7;
+      --ok: #22c55e;
+      --danger: #ef4444;
     }
     * { box-sizing: border-box; }
     body {
@@ -141,14 +143,38 @@ def neon_styles() -> str:
     .banner.controller { background: rgba(168,85,247,0.2); border: 1px solid rgba(168,85,247,0.45); }
     .status-pill {
       display: inline-flex; padding: 6px 12px; border-radius: 999px;
-      background: rgba(255,45,85,0.2); color: #fecdd3; font-weight: 700;
+      background: rgba(34,197,94,0.2); color: #bbf7d0; font-weight: 700;
+      border: 1px solid rgba(34,197,94,0.4);
     }
-    .status-pill.off { background: rgba(148, 163, 184, 0.2); color: #cbd5f5; }
+    .status-pill.off {
+      background: rgba(148, 163, 184, 0.2);
+      color: #cbd5f5;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+    }
+    .status-pill.alert {
+      background: rgba(239,68,68,0.22);
+      border: 1px solid rgba(248,113,113,0.8);
+      color: #fecaca;
+      animation: pulse-alert 0.55s infinite alternate;
+      box-shadow: 0 0 0 rgba(248,113,113,0.5);
+    }
     .grid { display: grid; gap: 12px; margin-top: 14px; }
+    .grid.two { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .panel {
+      background: rgba(15, 23, 42, 0.72);
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      padding: 14px;
+    }
+    .panel h3 { margin: 0 0 8px; font-size: 16px; color: #dbeafe; }
+    .panel p { margin: 0; color: var(--muted); }
     .btn {
       width: 100%; border: none; border-radius: 12px; padding: 14px;
       font-size: 18px; font-weight: 700; cursor: pointer;
+      transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
     }
+    .btn:hover { transform: translateY(-1px); filter: brightness(1.04); }
+    .btn:active { transform: translateY(0); }
     .btn.primary { background: linear-gradient(135deg, #ff2d55, #ff7a85); color: #fff; }
     .btn.secondary { background: rgba(15,23,42,0.95); color: #fff; border: 1px solid rgba(255,255,255,0.12); }
     .btn.warning { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #111827; }
@@ -156,6 +182,37 @@ def neon_styles() -> str:
     .info-row { display: flex; flex-wrap: wrap; gap: 10px 14px; color: var(--muted); }
     .links a { color: #fda4af; text-decoration: none; }
     code { background: rgba(30,41,59,0.75); border-radius: 7px; padding: 1px 6px; }
+    .siren-lights {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 14px;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .light {
+      height: 18px;
+      border-radius: 999px;
+      opacity: 0.35;
+      transition: opacity 0.2s ease, box-shadow 0.2s ease;
+    }
+    .light.blue { background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
+    .light.red { background: linear-gradient(90deg, #ef4444, #f87171); }
+    body.alarm .light { opacity: 1; }
+    body.alarm .light.blue { animation: blink-blue 0.25s infinite alternate; }
+    body.alarm .light.red { animation: blink-red 0.25s infinite alternate; }
+    @keyframes blink-blue {
+      from { box-shadow: 0 0 8px rgba(56, 189, 248, 0.5); }
+      to { box-shadow: 0 0 20px rgba(56, 189, 248, 0.95); }
+    }
+    @keyframes blink-red {
+      from { box-shadow: 0 0 8px rgba(248, 113, 113, 0.5); }
+      to { box-shadow: 0 0 20px rgba(248, 113, 113, 0.95); }
+    }
+    @keyframes pulse-alert {
+      from { box-shadow: 0 0 0 rgba(248,113,113,0.3); }
+      to { box-shadow: 0 0 18px rgba(248,113,113,0.6); }
+    }
     """
 
 
@@ -167,10 +224,14 @@ def neon_script() -> str:
     const endpointStatus = document.body.dataset.statusEndpoint || '';
 
     function setStatus(state, message, last) {
+      const normalized = (state || '').toLowerCase();
+      const alarming = normalized.includes('toc') || normalized.includes('ligad');
       if (statusEl && state) {
         statusEl.textContent = state;
-        statusEl.classList.toggle('off', state.toLowerCase().includes('parad') || state.toLowerCase().includes('off'));
+        statusEl.classList.toggle('off', normalized.includes('parad') || normalized.includes('off'));
+        statusEl.classList.toggle('alert', alarming);
       }
+      document.body.classList.toggle('alarm', alarming);
       if (messageEl && typeof message === 'string') messageEl.innerHTML = message;
       if (lastEl && (last || last === '')) lastEl.textContent = last || '—';
     }
@@ -261,6 +322,10 @@ def layout_page(*, title: str, subtitle: str, banner_class: str, banner_text: st
             <div class='banner {html.escape(banner_class)}'>{html.escape(banner_text)}</div>
             <h1 class='title'>🚨 {html.escape(title)}</h1>
             <p class='subtitle'>{html.escape(subtitle)}</p>
+            <div class='siren-lights'>
+              <span class='light blue'></span>
+              <span class='light red'></span>
+            </div>
             {body_html}
           </div>
         </div>
@@ -525,6 +590,16 @@ class ReceiverHandler(BaseHandler):
           <span>Status: <span class='status-pill {'off' if status_text == 'Parada' else ''}' data-status>{status_text}</span></span>
           <span>Último acionamento: <strong data-last>{html.escape(last_emit_at)}</strong></span>
         </div>
+        <div class='grid two'>
+          <div class='panel'>
+            <h3>Função do receptor</h3>
+            <p>Executa o som da sirene localmente e mantém o status em tempo real.</p>
+          </div>
+          <div class='panel'>
+            <h3>Conexão</h3>
+            <p>As ações de ligar/parar são recebidas do controlador por API HTTP.</p>
+          </div>
+        </div>
         <div class='grid'>
           <button class='btn warning' data-action='/stop'>Parar Sirene no Receptor</button>
         </div>
@@ -749,6 +824,16 @@ class ControllerHandler(BaseHandler):
           <span>Receptor alvo: <code>{html.escape(self.cfg.receiver_url)}</code></span>
           <span>Status: <span class='status-pill off' data-status>Parada</span></span>
           <span>Último acionamento: <strong data-last>—</strong></span>
+        </div>
+        <div class='grid two'>
+          <div class='panel'>
+            <h3>Link público oficial</h3>
+            <p>Este painel é o único ponto público para comandar o receptor.</p>
+          </div>
+          <div class='panel'>
+            <h3>Destino dos comandos</h3>
+            <p>Todos os comandos são encaminhados para <code>{html.escape(self.cfg.receiver_url)}</code>.</p>
+          </div>
         </div>
         <div class='grid'>
           <button class='btn primary' data-action='/emit'>Ligar Sirene</button>
@@ -1004,11 +1089,9 @@ def print_effective_config(cfg: RuntimeConfig) -> None:
 
 def run_both(cfg: RuntimeConfig) -> None:
     ngrok_mgr = NgrokManager()
-    receiver_public = None
     controller_public = None
 
     if cfg.ngrok:
-        receiver_public = ngrok_mgr.start_tunnel(cfg.receiver_port)
         controller_public = ngrok_mgr.start_tunnel(cfg.controller_port)
 
     local_ip = detect_local_ip()
@@ -1018,10 +1101,9 @@ def run_both(cfg: RuntimeConfig) -> None:
     if local_ip not in LOCALHOSTS:
         LOG.info("Receptor na rede local: http://%s:%d", local_ip, cfg.receiver_port)
         LOG.info("Controlador na rede local: http://%s:%d", local_ip, cfg.controller_port)
-    if receiver_public:
-        LOG.info("Receptor público (ngrok): %s", receiver_public)
     if controller_public:
         LOG.info("Controlador público (ngrok): %s", controller_public)
+        LOG.info("Link público único ativo: use apenas o CONTROLADOR.")
 
     def _shutdown(*_: Any) -> None:
         LOG.info("Encerrando...")
