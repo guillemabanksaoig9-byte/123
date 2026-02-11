@@ -113,127 +113,106 @@ def neon_styles() -> str:
     return """
     :root {
       color-scheme: dark;
-      --card: rgba(10, 14, 26, 0.8);
-      --card-border: rgba(255, 255, 255, 0.1);
-      --accent: #ff2d55;
+      --bg-top: #0b1220;
+      --bg-bottom: #040509;
+      --card: rgba(11, 16, 30, 0.82);
+      --card-border: rgba(255, 255, 255, 0.14);
       --text: #f8fafc;
-      --muted: #8b98a7;
-      --receiver: #0ea5e9;
-      --controller: #a855f7;
-      --ok: #22c55e;
-      --danger: #ef4444;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
-      background: radial-gradient(circle at top, #10162c 0%, #06060a 60%, #050508 100%);
+      background: radial-gradient(circle at top, var(--bg-top) 0%, #080b14 55%, var(--bg-bottom) 100%);
       color: var(--text); min-height: 100vh; display: flex;
       align-items: center; justify-content: center;
     }
-    .wrap { width: min(920px, 94vw); }
+    .wrap { width: min(700px, 94vw); }
     .card {
       backdrop-filter: blur(18px); background: var(--card);
-      border: 1px solid var(--card-border); border-radius: 20px;
-      padding: 28px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      border: 1px solid var(--card-border); border-radius: 24px;
+      padding: 28px; box-shadow: 0 28px 70px rgba(0, 0, 0, 0.55);
+      transition: border-color 0.3s ease, transform 0.25s ease;
     }
-    .title { margin: 0 0 8px; font-size: 30px; }
-    .subtitle { color: var(--muted); margin-top: 0; }
-    .banner { border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; font-weight: 700; }
-    .banner.receiver { background: rgba(14,165,233,0.2); border: 1px solid rgba(14,165,233,0.45); }
-    .banner.controller { background: rgba(168,85,247,0.2); border: 1px solid rgba(168,85,247,0.45); }
-    .status-pill {
-      display: inline-flex; padding: 6px 12px; border-radius: 999px;
-      background: rgba(34,197,94,0.2); color: #bbf7d0; font-weight: 700;
-      border: 1px solid rgba(34,197,94,0.4);
+    .card.controller { border-color: rgba(192, 132, 252, 0.45); }
+    .card.receiver { border-color: rgba(56, 189, 248, 0.45); }
+    .role-badge {
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      padding: 8px 12px;
+      border-radius: 999px;
+      margin-bottom: 22px;
+      text-transform: uppercase;
     }
-    .status-pill.off {
-      background: rgba(148, 163, 184, 0.2);
-      color: #cbd5f5;
-      border: 1px solid rgba(148, 163, 184, 0.35);
+    .role-badge.controller {
+      background: rgba(192, 132, 252, 0.16);
+      border: 1px solid rgba(192, 132, 252, 0.5);
+      color: #e9d5ff;
     }
-    .status-pill.alert {
-      background: rgba(239,68,68,0.22);
-      border: 1px solid rgba(248,113,113,0.8);
-      color: #fecaca;
-      animation: pulse-alert 0.55s infinite alternate;
-      box-shadow: 0 0 0 rgba(248,113,113,0.5);
+    .role-badge.receiver {
+      background: rgba(56, 189, 248, 0.16);
+      border: 1px solid rgba(56, 189, 248, 0.5);
+      color: #d1f4ff;
     }
-    .grid { display: grid; gap: 12px; margin-top: 14px; }
-    .grid.two { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-    .panel {
-      background: rgba(15, 23, 42, 0.72);
-      border-radius: 14px;
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      padding: 14px;
-    }
-    .panel h3 { margin: 0 0 8px; font-size: 16px; color: #dbeafe; }
-    .panel p { margin: 0; color: var(--muted); }
+    .controls { display: grid; gap: 12px; }
     .btn {
       width: 100%; border: none; border-radius: 12px; padding: 14px;
       font-size: 18px; font-weight: 700; cursor: pointer;
-      transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
+      transition: transform 0.14s ease, box-shadow 0.22s ease, filter 0.22s ease, opacity 0.2s ease;
     }
-    .btn:hover { transform: translateY(-1px); filter: brightness(1.04); }
-    .btn:active { transform: translateY(0); }
-    .btn.primary { background: linear-gradient(135deg, #ff2d55, #ff7a85); color: #fff; }
+    .btn:hover { transform: translateY(-2px); filter: brightness(1.05); }
+    .btn:active { transform: translateY(1px) scale(0.995); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.primary {
+      background: linear-gradient(135deg, #ff2d55, #ff7a85);
+      color: #fff;
+      box-shadow: 0 12px 26px rgba(255, 45, 85, 0.35);
+    }
     .btn.secondary { background: rgba(15,23,42,0.95); color: #fff; border: 1px solid rgba(255,255,255,0.12); }
-    .btn.warning { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #111827; }
-    .response { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: rgba(6,10,24,0.8); }
-    .info-row { display: flex; flex-wrap: wrap; gap: 10px 14px; color: var(--muted); }
-    .links a { color: #fda4af; text-decoration: none; }
-    code { background: rgba(30,41,59,0.75); border-radius: 7px; padding: 1px 6px; }
-    .siren-lights {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-top: 14px;
-      border-radius: 999px;
+    .btn.warning {
+      background: linear-gradient(135deg, #f59e0b, #fbbf24);
+      color: #111827;
+      box-shadow: 0 12px 26px rgba(245, 158, 11, 0.28);
+    }
+    .siren {
+      margin: 2px 0 16px;
+      height: 52px;
+      border-radius: 16px;
+      display: flex;
       overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(10, 14, 26, 0.58);
+      box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.34);
     }
     .light {
-      height: 18px;
-      border-radius: 999px;
+      flex: 1;
       opacity: 0.35;
-      transition: opacity 0.2s ease, box-shadow 0.2s ease;
+      transition: opacity 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
     }
-    .light.blue { background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
-    .light.red { background: linear-gradient(90deg, #ef4444, #f87171); }
+    .light.blue { background: linear-gradient(120deg, #0ea5e9, #7dd3fc); }
+    .light.red { background: linear-gradient(120deg, #ef4444, #fca5a5); }
     body.alarm .light { opacity: 1; }
-    body.alarm .light.blue { animation: blink-blue 0.25s infinite alternate; }
-    body.alarm .light.red { animation: blink-red 0.25s infinite alternate; }
+    body.alarm .light.blue { animation: blink-blue 0.28s infinite alternate; }
+    body.alarm .light.red { animation: blink-red 0.28s infinite alternate; }
+    body.alarm .card { transform: translateY(-2px); }
     @keyframes blink-blue {
-      from { box-shadow: 0 0 8px rgba(56, 189, 248, 0.5); }
-      to { box-shadow: 0 0 20px rgba(56, 189, 248, 0.95); }
+      from { box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); transform: translateX(0); }
+      to { box-shadow: 0 0 24px rgba(56, 189, 248, 0.98); transform: translateX(-3px); }
     }
     @keyframes blink-red {
-      from { box-shadow: 0 0 8px rgba(248, 113, 113, 0.5); }
-      to { box-shadow: 0 0 20px rgba(248, 113, 113, 0.95); }
-    }
-    @keyframes pulse-alert {
-      from { box-shadow: 0 0 0 rgba(248,113,113,0.3); }
-      to { box-shadow: 0 0 18px rgba(248,113,113,0.6); }
+      from { box-shadow: 0 0 10px rgba(248, 113, 113, 0.5); transform: translateX(0); }
+      to { box-shadow: 0 0 24px rgba(248, 113, 113, 0.98); transform: translateX(3px); }
     }
     """
-
-
 def neon_script() -> str:
     return """
-    const statusEl = document.querySelector('[data-status]');
-    const messageEl = document.querySelector('[data-message]');
-    const lastEl = document.querySelector('[data-last]');
     const endpointStatus = document.body.dataset.statusEndpoint || '';
 
-    function setStatus(state, message, last) {
+    function setStatus(state) {
       const normalized = (state || '').toLowerCase();
       const alarming = normalized.includes('toc') || normalized.includes('ligad');
-      if (statusEl && state) {
-        statusEl.textContent = state;
-        statusEl.classList.toggle('off', normalized.includes('parad') || normalized.includes('off'));
-        statusEl.classList.toggle('alert', alarming);
-      }
       document.body.classList.toggle('alarm', alarming);
-      if (messageEl && typeof message === 'string') messageEl.innerHTML = message;
-      if (lastEl && (last || last === '')) lastEl.textContent = last || '—';
     }
 
     function playFastPoliceSiren(durationMs = 2800) {
@@ -271,8 +250,7 @@ def neon_script() -> str:
       });
       const payload = await response.json();
       const statusText = payload.status || (payload.ok ? 'OK' : 'Falha');
-      const extra = payload.receiver_status ? `<br><small>receiver_status=${payload.receiver_status}</small>` : '';
-      setStatus(statusText, `<strong>${payload.message || ''}</strong>${extra}`, payload.last_emit_at || '—');
+      setStatus(statusText);
       return payload;
     }
 
@@ -281,8 +259,8 @@ def neon_script() -> str:
       try {
         const r = await fetch(endpointStatus, { headers: { Accept: 'application/json' } });
         const p = await r.json();
-        if (p.running === true) setStatus('Tocando', messageEl ? messageEl.innerHTML : '', p.last_emit_at || '—');
-        if (p.running === false) setStatus('Parada', messageEl ? messageEl.innerHTML : '', p.last_emit_at || '—');
+        if (p.running === true) setStatus('Tocando');
+        if (p.running === false) setStatus('Parada');
       } catch (_) {}
     }
 
@@ -295,7 +273,7 @@ def neon_script() -> str:
           if (payload.ok && action.includes('/emit')) playFastPoliceSiren();
           await refreshStatus();
         } catch (_) {
-          setStatus('Falha', '<strong>Erro de rede ao executar ação.</strong>', null);
+          setStatus('Falha');
         } finally {
           btn.disabled = false;
         }
@@ -305,24 +283,20 @@ def neon_script() -> str:
     refreshStatus();
     setInterval(refreshStatus, 3000);
     """
-
-
-def layout_page(*, title: str, subtitle: str, banner_class: str, banner_text: str, body_html: str, status_endpoint: str) -> str:
+def layout_page(*, role_class: str, role_text: str, body_html: str, status_endpoint: str) -> str:
     return f"""
     <html>
       <head>
         <meta charset='utf-8'>
         <meta name='viewport' content='width=device-width, initial-scale=1'>
-        <title>{html.escape(title)}</title>
+        <title>{html.escape(role_text)}</title>
         <style>{neon_styles()}</style>
       </head>
       <body data-status-endpoint='{html.escape(status_endpoint)}'>
         <div class='wrap'>
-          <div class='card'>
-            <div class='banner {html.escape(banner_class)}'>{html.escape(banner_text)}</div>
-            <h1 class='title'>🚨 {html.escape(title)}</h1>
-            <p class='subtitle'>{html.escape(subtitle)}</p>
-            <div class='siren-lights'>
+          <div class='card {html.escape(role_class)}'>
+            <div class='role-badge {html.escape(role_class)}'>{html.escape(role_text)}</div>
+            <div class='siren'>
               <span class='light blue'></span>
               <span class='light red'></span>
             </div>
@@ -572,34 +546,14 @@ class ReceiverHandler(BaseHandler):
             self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
             return
 
-        snap = self.state.snapshot()
-        status_text = "Tocando" if snap["running"] else "Parada"
-        last_emit_at = snap["last_emit_at"] or "—"
-
-        controller_block = (
-            f"<div class='response links'><a href='{html.escape(self.cfg.controller_url or '')}' target='_blank'>Abrir controlador</a></div>"
-            if self.cfg.controller_url
-            else ""
-        )
-
         body = f"""
-        <div class='info-row'>
-          <span>Papel: <code>RECEPTOR</code></span>
-          <span>Host/porta: <code>{html.escape(self.cfg.bind)}:{self.cfg.port}</code></span>
-          <span>Status: <span class='status-pill {'off' if status_text == 'Parada' else ''}' data-status>{status_text}</span></span>
-          <span>Último acionamento: <strong data-last>{html.escape(last_emit_at)}</strong></span>
+        <div class='controls'>
+          <button class='btn warning' data-action='/stop'>Desligar Sirene</button>
         </div>
-        <div class='grid'>
-          <button class='btn warning' data-action='/stop'>Parar Sirene no Receptor</button>
-        </div>
-        <div class='response' data-message>Receptor local ativo.</div>
-        {controller_block}
         """
         page = layout_page(
-            title="Receptor da Sirene",
-            subtitle="Som local.",
-            banner_class="receiver",
-            banner_text="RECEPTOR",
+            role_class="receiver",
+            role_text="Painel Receptor",
             body_html=body,
             status_endpoint="/status",
         )
@@ -801,38 +755,15 @@ class ControllerHandler(BaseHandler):
             self._write(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
             return
 
-        body = f"""
-        <div class='info-row'>
-          <span>Papel: <code>CONTROLADOR</code></span>
-          <span>Host/porta: <code>{html.escape(self.cfg.bind)}:{self.cfg.port}</code></span>
-          <span>Receptor alvo: <code>{html.escape(self.cfg.receiver_url)}</code></span>
-          <span>Status: <span class='status-pill off' data-status>Parada</span></span>
-          <span>Último acionamento: <strong data-last>—</strong></span>
-        </div>
-        <div class='grid two'>
-          <div class='panel'>
-            <h3>Link público oficial</h3>
-            <p>Este painel é o único ponto público para comandar o receptor.</p>
-          </div>
-          <div class='panel'>
-            <h3>Destino dos comandos</h3>
-            <p>Todos os comandos são encaminhados para <code>{html.escape(self.cfg.receiver_url)}</code>.</p>
-          </div>
-        </div>
-        <div class='grid'>
+        body = """
+        <div class='controls'>
           <button class='btn primary' data-action='/emit'>Ligar Sirene</button>
-          <button class='btn secondary' data-action='/stop'>Parar Sirene</button>
-        </div>
-        <div class='response' data-message>Pronto para enviar comandos ao receptor.</div>
-        <div class='response'>
-          Endpoints: <code>GET /status</code> | <code>POST /emit</code> | <code>POST /stop</code>
+          <button class='btn secondary' data-action='/stop'>Desligar Sirene</button>
         </div>
         """
         page = layout_page(
-            title="Controlador Central",
-            subtitle="Painel remoto para emitir/parar a sirene.",
-            banner_class="controller",
-            banner_text="Você está no CONTROLADOR (comando remoto)",
+            role_class="controller",
+            role_text="Painel Controlador",
             body_html=body,
             status_endpoint="/status",
         )
