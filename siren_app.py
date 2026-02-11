@@ -185,43 +185,6 @@ def neon_styles() -> str:
       background: rgba(10, 14, 26, 0.58);
       box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.34);
     }
-    .beacon-wrap {
-      display: flex;
-      justify-content: center;
-      margin: 0 0 14px;
-      perspective: 500px;
-    }
-    .beacon {
-      width: 78px;
-      height: 64px;
-      position: relative;
-      transform-style: preserve-3d;
-    }
-    .beacon::before {
-      content: '';
-      position: absolute;
-      left: 4px;
-      right: 4px;
-      bottom: 0;
-      height: 14px;
-      border-radius: 10px;
-      background: linear-gradient(180deg, #6b7280, #111827);
-      box-shadow: 0 2px 12px rgba(0,0,0,0.45);
-    }
-    .beacon::after {
-      content: '';
-      position: absolute;
-      left: 14px;
-      right: 14px;
-      top: 4px;
-      bottom: 10px;
-      border-radius: 18px 18px 10px 10px;
-      background: conic-gradient(from 0deg, rgba(14,165,233,0.2), rgba(14,165,233,0.95), rgba(239,68,68,0.2), rgba(239,68,68,0.95));
-      box-shadow: inset 0 0 18px rgba(255,255,255,0.18), 0 0 10px rgba(125,211,252,0.22);
-      opacity: 0.75;
-      transform-origin: 50% 68%;
-      transition: box-shadow 0.16s ease, opacity 0.16s ease;
-    }
     .light {
       flex: 1;
       opacity: 0.35;
@@ -232,11 +195,6 @@ def neon_styles() -> str:
     body.alarm .light { opacity: 1; }
     body.alarm .light.blue { animation: blink-blue 0.28s infinite alternate; }
     body.alarm .light.red { animation: blink-red 0.28s infinite alternate; }
-    body.alarm .beacon::after {
-      opacity: 1;
-      animation: beacon-spin 0.34s linear infinite, beacon-flash 0.18s steps(2, end) infinite;
-      box-shadow: inset 0 0 18px rgba(255,255,255,0.22), 0 0 28px rgba(56, 189, 248, 0.72), 0 0 36px rgba(248, 113, 113, 0.62);
-    }
     body.alarm .card { transform: translateY(-2px); }
     @keyframes blink-blue {
       from { box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); transform: translateX(0); }
@@ -245,14 +203,6 @@ def neon_styles() -> str:
     @keyframes blink-red {
       from { box-shadow: 0 0 10px rgba(248, 113, 113, 0.5); transform: translateX(0); }
       to { box-shadow: 0 0 24px rgba(248, 113, 113, 0.98); transform: translateX(3px); }
-    }
-    @keyframes beacon-spin {
-      from { transform: rotateY(0deg); }
-      to { transform: rotateY(360deg); }
-    }
-    @keyframes beacon-flash {
-      0%, 49% { filter: brightness(0.9); }
-      50%, 100% { filter: brightness(1.45); }
     }
     """
 def neon_script() -> str:
@@ -318,14 +268,10 @@ def neon_script() -> str:
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         const action = btn.dataset.action;
-        if (action.includes('/emit')) {
-          setStatus('Ligada');
-          playFastPoliceSiren();
-        }
-        if (action.includes('/stop')) setStatus('Parada');
         try {
           const payload = await postAction(action);
-          if (!payload.ok) await refreshStatus();
+          if (payload.ok && action.includes('/emit')) playFastPoliceSiren();
+          await refreshStatus();
         } catch (_) {
           setStatus('Falha');
         } finally {
@@ -335,7 +281,7 @@ def neon_script() -> str:
     });
 
     refreshStatus();
-    setInterval(refreshStatus, 800);
+    setInterval(refreshStatus, 3000);
     """
 def layout_page(*, role_class: str, role_text: str, body_html: str, status_endpoint: str) -> str:
     return f"""
@@ -350,7 +296,6 @@ def layout_page(*, role_class: str, role_text: str, body_html: str, status_endpo
         <div class='wrap'>
           <div class='card {html.escape(role_class)}'>
             <div class='role-badge {html.escape(role_class)}'>{html.escape(role_text)}</div>
-            <div class='beacon-wrap'><div class='beacon' aria-hidden='true'></div></div>
             <div class='siren'>
               <span class='light blue'></span>
               <span class='light red'></span>
@@ -376,8 +321,6 @@ class SirenPlayer:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._proc_lock = threading.Lock()
-        self._active_proc: Optional[subprocess.Popen[bytes]] = None
         self._wail_path, self._yelp_path = self._ensure_wav_files()
 
     def start(self) -> None:
@@ -391,16 +334,6 @@ class SirenPlayer:
 
     def stop(self) -> None:
         self._stop_event.set()
-        with self._proc_lock:
-            proc = self._active_proc
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=0.4)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        with self._proc_lock:
-            self._active_proc = None
         LOG.info("Sinal de parada enviado para a sirene")
 
     def is_running(self) -> bool:
@@ -470,21 +403,12 @@ class SirenPlayer:
                 continue
             try:
                 proc = subprocess.Popen([cmd, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                with self._proc_lock:
-                    self._active_proc = proc
                 while proc.poll() is None:
                     if self._stop_event.is_set():
                         proc.terminate()
-                        try:
-                            proc.wait(timeout=0.4)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        with self._proc_lock:
-                            self._active_proc = None
+                        proc.wait(timeout=2)
                         return
-                    time.sleep(0.02)
-                with self._proc_lock:
-                    self._active_proc = None
+                    time.sleep(0.1)
                 return
             except OSError:
                 continue
